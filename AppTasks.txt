@@ -1,0 +1,243 @@
+============================================================
+PROJECT TASK STRUCTURE — WITH PRIORITIES & WORK PACKAGES
+============================================================
+Priority levels:
+
+P1 = Critical (must be done first, blocks other tasks)
+
+P2 = Important (core features, but not blocking)
+
+P3 = Enhancements (polish, improvements, optional extras)
+
+Developer roles (suggested):
+
+Dev A – BLE & Data Pipeline
+
+Dev B – Domain Models & Storage
+
+Dev C – UI & Visualization
+
+Dev D – Signal Processing
+
+Each task includes a short explanation so junior developers know exactly what to do.
+
+============================================================
+1. PROJECT SETUP (P1)
+============================================================
+1.1 Flutter Project Setup (Dev A)
+[ ] Verify Flutter SDK installation
+
+[ ] Confirm project builds on Android & iOS
+
+[ ] Configure linting (analysis_options.yaml)
+
+[ ] Add README with setup instructions
+
+1.2 Git Workflow Setup (Dev A)
+[ ] Create main + develop branches
+
+[ ] Define feature branch naming (feature/<task-name>)
+
+[ ] Add PR template
+
+[ ] Add .gitignore
+
+============================================================
+2. DOMAIN LAYER (P1) — Dev B
+============================================================
+2.1 Core Models
+[ ] Implement EcgSample
+
+[ ] Implement HeartRateValue
+
+[ ] Implement EcgEventType
+
+[ ] Implement EcgEvent
+
+[ ] Implement EcgSession
+
+Instructions:  
+Each model should be a simple Dart class with final fields and no logic.
+Keep them pure and independent from UI/BLE.
+
+2.2 Unit Tests
+[ ] Write simple tests verifying constructors and field values
+
+============================================================
+3. BLE LAYER (P1) — Dev A
+============================================================
+3.1 BLE Packet Parser
+[ ] Create EcgPacketParser
+
+[ ] Parse 47‑byte packet
+
+[ ] Extract timestamp, HR, flags, samples
+
+[ ] Reconstruct per‑sample timestamps
+
+[ ] Return EcgPacket object
+
+Instructions:  
+Use ByteData.sublistView and little‑endian decoding.
+Throw an error if packet size is wrong.
+
+3.2 BLE Communication
+[ ] Implement BLE scanning
+
+[ ] Implement connection to device
+
+[ ] Subscribe to notify characteristic
+
+[ ] Forward raw packets to parser
+
+Instructions:  
+Use flutter_reactive_ble or similar.
+Keep BLE logic in its own service class.
+
+============================================================
+4. DATA HANDLING LAYER (P1) — Dev A + Dev B
+============================================================
+4.1 Ring Buffer (Dev B)
+[ ] Implement fixed‑size buffer for ECG samples
+
+[ ] Add write pointer + read pointer
+
+[ ] Handle overflow by overwriting oldest data
+
+[ ] Add unit tests
+
+Instructions:  
+Use a List<EcgSample> with modular indexing.
+
+4.2 Data Pipeline (Dev A)
+[ ] Connect BLE parser → ring buffer
+
+[ ] Expose stream of samples to ViewModel
+
+[ ] Ensure thread‑safe operations
+
+============================================================
+5. SIGNAL PROCESSING (P2) — Dev D
+============================================================
+5.1 Filtering
+[ ] Implement high‑pass filter
+
+[ ] Implement low‑pass filter
+
+[ ] Implement notch filter (50/60 Hz)
+
+5.2 R‑Peak Detection
+[ ] Implement simple Pan‑Tompkins or threshold‑based detection
+
+[ ] Output R‑peak timestamps
+
+5.3 Heart‑Rate Calculation
+[ ] Compute BPM from R‑R intervals
+
+[ ] Smooth with moving average
+
+5.4 Event Detection
+[ ] Detect PVCs
+
+[ ] Detect pauses
+
+[ ] Detect tachycardia/bradycardia
+
+[ ] Detect artifacts
+
+Instructions:  
+Start with simple algorithms.
+Accuracy can be improved later.
+
+============================================================
+6. STORAGE LAYER (P2) — Dev B
+============================================================
+6.1 Session Storage
+[ ] Define storage format (JSON or binary)
+
+[ ] Save ECG sessions locally
+
+[ ] Load sessions from storage
+
+6.2 Metadata Index
+[ ] Store session metadata separately
+
+[ ] Provide fast session list loading
+
+6.3 Export
+[ ] Export session to JSON file
+
+============================================================
+7. PRESENTATION LAYER (P2) — Dev C
+============================================================
+7.1 ViewModels
+[ ] LiveECGViewModel
+
+[ ] SessionListViewModel
+
+[ ] SessionDetailViewModel
+
+7.2 UI Screens
+[ ] Live ECG screen
+
+[ ] Device connection screen
+
+[ ] Session list screen
+
+[ ] Session detail screen
+
+[ ] Settings screen
+
+Instructions:  
+Use MVVM pattern.
+UI should never contain business logic.
+
+============================================================
+8. VISUALIZATION (P2) — Dev C
+============================================================
+8.1 ECG Waveform Renderer
+[ ] Implement custom painter for ECG line
+
+[ ] Smooth scrolling at 500 Hz
+
+[ ] Efficient drawing (avoid jank)
+
+8.2 Indicators
+[ ] Heart‑rate display
+
+[ ] Lead‑off warning
+
+[ ] Event markers
+
+============================================================
+9. QA & TESTING (P2) — All Devs
+============================================================
+9.1 Unit Tests
+[ ] Domain models
+
+[ ] Parser
+
+[ ] Ring buffer
+
+[ ] Signal processing
+
+9.2 Integration Tests
+[ ] BLE → parser → buffer → UI
+
+9.3 Performance
+[ ] Test continuous 500 Hz stream
+
+[ ] Memory profiling
+
+============================================================
+10. RELEASE PREPARATION (P3) — Dev C
+============================================================
+[ ] App icon
+
+[ ] Android/iOS permissions
+
+[ ] Versioning
+
+[ ] Release build scripts
+
+[ ] User documentation

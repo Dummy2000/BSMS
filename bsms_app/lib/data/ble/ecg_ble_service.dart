@@ -1,3 +1,6 @@
+import 'ecg_packet.dart';
+import 'ecg_packet_parser.dart';
+
 class EcgBleService {
   final EcgPacketParser parser;
 

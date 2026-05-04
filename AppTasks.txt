@@ -25,18 +25,21 @@ Each task includes a short explanation so junior developers know exactly what to
 1. PROJECT SETUP (P1)
 ============================================================
 1.1 Flutter Project Setup (Dev A)
-[ ] Verify Flutter SDK installation
+[x] Verify Flutter SDK installation
 
-[ ] Confirm project builds on Android & iOS
+[x] Confirm project builds on Android 
+
+[ ] Confirm project builds on iOS
 
 [ ] Configure linting (analysis_options.yaml)
 
 [ ] Add README with setup instructions
 
 1.2 Git Workflow Setup (Dev A)
-[ ] Create main + develop branches
 
-[ ] Define feature branch naming (feature/<task-name>)
+[x] Create main + develop branches
+
+[x] Define feature branch naming (feature/<task-name>)
 
 [ ] Add PR template
 

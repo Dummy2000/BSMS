@@ -1,0 +1,179 @@
+#include <Arduino.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <SPI.h>  // Added for SD card communication
+#include <SD.h>   // Added for SD card file management
+
+// ===== Pins Configuration =====
+constexpr uint8_t ECG_PIN      = 34;
+constexpr uint8_t LO_PLUS_PIN  = 35;   // AD8232 LO+
+constexpr uint8_t LO_MINUS_PIN = 36;   // AD8232 LO-
+constexpr uint8_t SD_CS_PIN    = 5;    // Chip Select pin for SD Card Module
+
+// ===== BLE UUIDs =====
+#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+
+// ===== Sampling & ECG Constants =====
+unsigned long nextSampleTime;
+constexpr uint16_t PEAK_THRESHOLD = 3500;
+constexpr unsigned long REFRACTORY_MS = 250;
+constexpr uint8_t SAMPLES_PER_BATCH = 20;
+
+// ===== Data Structures =====
+// Packed structure for efficient BLE transmission and SD storage (47 bytes total)
+struct __attribute__((packed)) EcgPacket {
+  uint32_t timestamp_ms;                  // 4 Bytes: System time in ms
+  uint8_t  hr_avg;                        // 1 Byte: Smoothed Heart Rate
+  uint8_t  sample_count;                  // 1 Byte: Number of samples (20)
+  uint8_t  status_flags;                  // 1 Byte: Lead-off detection status
+  uint16_t samples[SAMPLES_PER_BATCH];    // 40 Bytes: 20 Raw ADC values
+};
+
+// Status-Flag-Bits for Lead-off detection[cite: 8]
+constexpr uint8_t STATUS_LO_PLUS  = 0x01;   // Bit 0: LO+ disconnected
+constexpr uint8_t STATUS_LO_MINUS = 0x02;   // Bit 1: LO- disconnected
+
+// ===== Global Variables =====
+BLECharacteristic* pCharacteristic = nullptr;
+bool deviceConnected = false;
+volatile uint8_t currentHR = 0;
+EcgPacket currentPacket;
+uint8_t   batchIndex = 0;
+bool      sdAvailable = false;
+const char* FILE_NAME = "/ekg_data.bin";
+
+// ===== Server Callbacks for BLE Connection Status =====
+class MyServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) override {
+    deviceConnected = true;
+    Serial.println("BLE Client connected");
+  }
+
+  void onDisconnect(BLEServer* pServer) override {
+    deviceConnected = false;
+    Serial.println("BLE Client disconnected. Restarting advertising...");
+    BLEDevice::startAdvertising();
+  }
+};
+
+// Heart Rate Peak Detection Logic[cite: 8]
+void detectPeak(uint16_t value, unsigned long now_ms) {
+  static bool aboveThreshold = false;
+  static unsigned long lastPeakTime = 0;
+  static float hrSmoothed = 0;
+
+  bool nowAbove = (value > PEAK_THRESHOLD);
+
+  if (nowAbove && !aboveThreshold && (now_ms - lastPeakTime > REFRACTORY_MS)) {
+    if (lastPeakTime > 0) {
+      unsigned long rr = now_ms - lastPeakTime;
+      uint16_t hrInstant = 60000 / rr;
+
+      if (hrInstant >= 30 && hrInstant <= 220) {
+        if (hrSmoothed == 0) hrSmoothed = hrInstant;
+        else hrSmoothed = 0.2f * hrInstant + 0.8f * hrSmoothed;
+        currentHR = (uint8_t)hrSmoothed;
+      }
+    }
+    lastPeakTime = now_ms;
+    Serial.printf("PEAK! HR=%u bpm\n", currentHR);
+  }
+  aboveThreshold = nowAbove;
+}
+
+void setup() {
+  Serial.begin(921600);
+  delay(500);
+  Serial.println("Initializing EKG-Holter...");
+
+  // ----- Initialize ADC and Lead-Off Pins -----
+  analogReadResolution(12);
+  analogSetPinAttenuation(ECG_PIN, ADC_11db);
+  pinMode(LO_PLUS_PIN,  INPUT);
+  pinMode(LO_MINUS_PIN, INPUT);
+
+  // ----- Initialize SD Card (SPI) -----
+  // Note: Default SPI pins for ESP32 are MOSI:23, MISO:19, SCK:18
+  if (!SD.begin(SD_CS_PIN)) {
+    Serial.println("SD Initialization Failed! Recording disabled.");
+    sdAvailable = false;
+  } else {
+    Serial.println("SD Card Initialized successfully.");
+    sdAvailable = true;
+    // Ensure file exists by opening and closing it
+    File root = SD.open(FILE_NAME, FILE_APPEND);
+    if (root) root.close();
+  }
+
+  // ----- Initialize BLE -----[cite: 8]
+  BLEDevice::init("EKG-Holter");
+  BLEDevice::setMTU(247);
+  BLEServer* pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService* pService = pServer->createService(SERVICE_UUID);
+  pCharacteristic = pService->createCharacteristic(
+    CHARACTERISTIC_UUID,
+    BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY
+  );
+
+  pCharacteristic->addDescriptor(new BLE2902());
+  pService->start();
+
+  BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  BLEDevice::startAdvertising();
+
+  Serial.println("BLE Advertising started. Waiting for connection...");
+  nextSampleTime = micros();
+}
+
+void loop() {
+  // Sampling at 500 Hz (every 2000 microseconds)[cite: 8]
+  if ((long)(micros() - nextSampleTime) >= 0) {
+    nextSampleTime += 2000;
+
+    uint16_t adcValue = analogRead(ECG_PIN);
+    detectPeak(adcValue, millis());
+
+    // Read Lead-Off status[cite: 8]
+    uint8_t status = 0;
+    if (digitalRead(LO_PLUS_PIN))  status |= STATUS_LO_PLUS;
+    if (digitalRead(LO_MINUS_PIN)) status |= STATUS_LO_MINUS;
+
+    // Buffer samples into packet
+    if (batchIndex == 0) {
+      currentPacket.timestamp_ms  = millis();
+      currentPacket.status_flags  = status;
+    }
+
+    currentPacket.samples[batchIndex] = adcValue;
+    batchIndex++;
+
+    // When batch of 20 samples is ready (approx. every 40ms)[cite: 8]
+    if (batchIndex >= SAMPLES_PER_BATCH) {
+      currentPacket.hr_avg       = currentHR;
+      currentPacket.sample_count = SAMPLES_PER_BATCH;
+
+      // 1. Transmit via Bluetooth
+      if (deviceConnected) {
+        pCharacteristic->setValue((uint8_t*)&currentPacket, sizeof(currentPacket));
+        pCharacteristic->notify();
+      }
+
+      // 2. Save to SD Card (Binary format for efficiency)
+      if (sdAvailable) {
+        File dataFile = SD.open(FILE_NAME, FILE_APPEND);
+        if (dataFile) {
+          dataFile.write((const uint8_t*)&currentPacket, sizeof(currentPacket));
+          dataFile.close(); // Save immediately to prevent data loss
+        }
+      }
+      batchIndex = 0;
+    }
+  }
+}

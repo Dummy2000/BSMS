@@ -1,0 +1,79 @@
+import struct
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy import signal
+
+# ==================== Configuration ====================
+PACKET_FORMAT = "<IBBB20H" 
+PACKET_SIZE = struct.calcsize(PACKET_FORMAT)
+INPUT_FILE = "ekg_data.bin"
+FS = 500  # Sampling Frequency: 500Hz[cite: 8]
+
+def apply_filters(data, fs):
+    """Apply Notch and Bandpass filters to the raw ADC signal."""
+    # 1. Notch Filter: Remove 50Hz power line noise (common in Austria)
+    f0 = 50.0  # Frequency to be removed
+    Q = 30.0   # Quality factor
+    b_notch, a_notch = signal.iirnotch(f0, Q, fs)
+    notched_data = signal.filtfilt(b_notch, a_notch, data)
+
+    # 2. Bandpass Filter: Keep frequency between 0.5Hz and 40Hz
+    # Low-cut (0.5Hz) removes baseline wander; High-cut (40Hz) removes muscle noise
+    lowcut = 0.5
+    highcut = 40.0
+    b_band, a_band = signal.butter(4, [lowcut, highcut], btype='band', fs=fs)
+    filtered_data = signal.filtfilt(b_band, a_band, notched_data)
+    
+    return filtered_data
+
+def decode_and_filter(file_path):
+    raw_values = []
+    timestamps = []
+    
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(PACKET_SIZE)
+            if len(chunk) < PACKET_SIZE:
+                break
+            
+            unpacked = struct.unpack(PACKET_FORMAT, chunk)
+            base_time = unpacked[0]
+            samples = unpacked[4:] # 20 ECG values[cite: 8]
+            
+            for i, val in enumerate(samples):
+                timestamps.append(base_time + (i * 2)) # 2ms intervals[cite: 8]
+                raw_values.append(val)
+
+    # Convert to numpy array for signal processing
+    raw_signal = np.array(raw_values)
+    
+    # Apply filters
+    clean_signal = apply_filters(raw_signal, FS)
+    
+    return timestamps, raw_signal, clean_signal
+
+# --- Execution and Plotting ---
+try:
+    times, raw, clean = decode_and_filter(INPUT_FILE)
+    
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+    
+    # Plot Raw Data
+    ax1.plot(times, raw, color='gray', alpha=0.5, label='Raw Signal')
+    ax1.set_title("Raw ECG Signal from SD Card")
+    ax1.set_ylabel("ADC Value")
+    ax1.legend()
+    
+    # Plot Filtered Data
+    ax2.plot(times, clean, color='blue', label='Filtered (Notch + Bandpass)')
+    ax2.set_title("Filtered ECG Signal (0.5-40Hz + 50Hz Notch)")
+    ax2.set_xlabel("Time (ms)")
+    ax2.set_ylabel("Amplitude")
+    ax2.legend()
+    
+    plt.tight_layout()
+    plt.show()
+
+except FileNotFoundError:
+    print(f"File {INPUT_FILE} not found.")

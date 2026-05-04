@@ -1,0 +1,67 @@
+import struct
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# ==================== Configuration ====================
+# This MUST match the C++ struct definition (47 bytes)
+# I: uint32 (4), B: uint8 (1), B: uint8 (1), B: uint8 (1), 20H: 20x uint16 (40)
+# Total: 4 + 1 + 1 + 1 + 40 = 47 bytes
+PACKET_FORMAT = "<IBBB20H" 
+PACKET_SIZE = struct.calcsize(PACKET_FORMAT)
+
+INPUT_FILE = "ekg_data.bin"  # The file from your SD card
+OUTPUT_CSV = "decoded_ecg.csv"
+
+def decode_sd_data(file_path):
+    all_data = []
+    
+    with open(file_path, "rb") as f:
+        print(f"Reading {file_path}...")
+        
+        while True:
+            # Read exactly 47 bytes from the file
+            chunk = f.read(PACKET_SIZE)
+            if len(chunk) < PACKET_SIZE:
+                break  # End of file
+            
+            # Unpack binary data into Python variables[cite: 2, 8]
+            unpacked = struct.unpack(PACKET_FORMAT, chunk)
+            
+            timestamp = unpacked[0]
+            hr = unpacked[1]
+            status = unpacked[3]
+            samples = unpacked[4:]  # The 20 ECG values
+            
+            # For plotting, we need to associate each sample with a unique timestamp
+            # Since 20 samples were taken at 500Hz, each is 2ms apart
+            for i, val in enumerate(samples):
+                all_data.append({
+                    "Timestamp_ms": timestamp + (i * 2),
+                    "HeartRate": hr,
+                    "LeadOffStatus": status,
+                    "ADC_Value": val
+                })
+
+    return pd.DataFrame(all_data)
+
+# --- Execution ---
+try:
+    df = decode_sd_data(INPUT_FILE)
+    
+    # 1. Save to CSV for analysis
+    df.to_csv(OUTPUT_CSV, index=False)
+    print(f"✅ Successfully decoded! Saved to: {OUTPUT_CSV}")
+
+    # 2. Plotting the results
+    plt.figure(figsize=(12, 6))
+    plt.plot(df["Timestamp_ms"], df["ADC_Value"], color='red', linewidth=0.5)
+    plt.title("ECG Waveform Restored from SD Card")
+    plt.xlabel("Time (ms)")
+    plt.ylabel("ADC Value")
+    plt.grid(True, alpha=0.3)
+    plt.show()
+
+except FileNotFoundError:
+    print(f"❌ Error: {INPUT_FILE} not found. Please copy it from the SD card.")
+except Exception as e:
+    print(f"❌ An error occurred: {e}")

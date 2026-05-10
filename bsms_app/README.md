@@ -1,17 +1,68 @@
-# bsms_app
+# BSMS App
 
-A new Flutter project.
+This repository contains the `bsms_app` Flutter project for the biomedical ECG monitoring application.
 
-## Getting Started
+## Project Purpose
 
-This project is a starting point for a Flutter application.
+The app is designed to connect to an ESP32-based `EKG-Holter` BLE device, parse ECG packet batches, buffer signal samples, and stream data for real-time visualization.
 
-A few resources to get you started if this is your first Flutter project:
+## Prerequisites
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+- Flutter SDK (tested with Flutter 3.41.9)
+- Dart SDK 3.11.5 (managed by Flutter)
+- Android Studio or Visual Studio Code for development
+- For iOS builds: macOS with Xcode installed
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Setup
+
+1. Open a terminal in `bsms_app`
+2. Run:
+
+```bash
+flutter pub get
+```
+
+3. Verify static analysis:
+
+```bash
+flutter analyze
+```
+
+4. Run tests:
+
+```bash
+flutter test test/integration_test.dart
+```
+
+## Running the App
+
+### Android
+
+```bash
+flutter run
+```
+
+### iOS (macOS only)
+
+```bash
+flutter run
+```
+
+Or to build without code signing:
+
+```bash
+flutter build ios --no-codesign
+```
+
+## Project Notes
+
+- BLE device name: `EKG-Holter`
+- BLE service UUID: `4fafc201-1fb5-459e-8fcc-c5c9c331914b`
+- BLE characteristic UUID: `beb5483e-36e1-4688-b7f5-ea07361b26a8`
+- Packet format: 47 bytes, little-endian, 20 samples per packet
+- Data rate: 500 Hz sample rate, 25 packets/s
+
+## Linting
+
+The project uses `flutter_lints` via `analysis_options.yaml`.
+The rule `avoid_print` is disabled for now to allow debug output during development.

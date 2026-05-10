@@ -1,7 +1,11 @@
 import 'package:flutter/material.dart';
+import 'app/app.dart';
 
+/// Entry point for the BSMS ECG monitoring application.
+/// 
+/// Initializes the Flutter app and delegates to the main app widget.
 void main() {
-  runApp(const MyApp());
+  runApp(const BsmsApp());
 }
 
 class MyApp extends StatelessWidget {

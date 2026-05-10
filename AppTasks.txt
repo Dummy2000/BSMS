@@ -11,7 +11,7 @@ P3 = Enhancements (polish, improvements, optional extras)
 
 Developer roles (suggested):
 
-Dev A – BLE & Data Pipeline
+Dev A – BLE & Data Pipeline (Stiina)
 
 Dev B – Domain Models & Storage
 
@@ -31,9 +31,9 @@ Each task includes a short explanation so junior developers know exactly what to
 
 [ ] Confirm project builds on iOS
 
-[ ] Configure linting (analysis_options.yaml)
+[x] Configure linting (analysis_options.yaml)
 
-[ ] Add README with setup instructions
+[x] Add README with setup instructions
 
 1.2 Git Workflow Setup (Dev A)
 
@@ -41,9 +41,9 @@ Each task includes a short explanation so junior developers know exactly what to
 
 [x] Define feature branch naming (feature/<task-name>)
 
-[ ] Add PR template
+[x] Add PR template
 
-[ ] Add .gitignore
+[x] Add .gitignore
 
 ============================================================
 2. DOMAIN LAYER (P1) — Dev B
@@ -70,28 +70,28 @@ Keep them pure and independent from UI/BLE.
 3. BLE LAYER (P1) — Dev A
 ============================================================
 3.1 BLE Packet Parser
-[ ] Create EcgPacketParser
+[x] Create EcgPacketParser
 
-[ ] Parse 47‑byte packet
+[x] Parse 47‑byte packet
 
-[ ] Extract timestamp, HR, flags, samples
+[x] Extract timestamp, HR, flags, samples
 
-[ ] Reconstruct per‑sample timestamps
+[x] Reconstruct per‑sample timestamps
 
-[ ] Return EcgPacket object
+[x] Return EcgPacket object
 
 Instructions:  
 Use ByteData.sublistView and little‑endian decoding.
 Throw an error if packet size is wrong.
 
 3.2 BLE Communication
-[ ] Implement BLE scanning
+[x] Implement BLE scanning
 
-[ ] Implement connection to device
+[x] Implement connection to device
 
-[ ] Subscribe to notify characteristic
+[x] Subscribe to notify characteristic
 
-[ ] Forward raw packets to parser
+[x] Forward raw packets to parser
 
 Instructions:  
 Use flutter_reactive_ble or similar.
@@ -101,23 +101,25 @@ Keep BLE logic in its own service class.
 4. DATA HANDLING LAYER (P1) — Dev A + Dev B
 ============================================================
 4.1 Ring Buffer (Dev B)
-[ ] Implement fixed‑size buffer for ECG samples
+[x] Implement fixed‑size buffer for ECG samples
 
-[ ] Add write pointer + read pointer
+[x] Add write pointer + read pointer
 
-[ ] Handle overflow by overwriting oldest data
+[x] Handle overflow by overwriting oldest data
 
-[ ] Add unit tests
+[x] Add unit tests
 
 Instructions:  
 Use a List<EcgSample> with modular indexing.
 
 4.2 Data Pipeline (Dev A)
-[ ] Connect BLE parser → ring buffer
+[x] Connect BLE parser → ring buffer
 
-[ ] Expose stream of samples to ViewModel
+[x] Expose stream of samples to ViewModel
 
-[ ] Ensure thread‑safe operations
+[x] Ensure thread‑safe operations
+
+[x] Create integration test for complete pipeline
 
 ============================================================
 5. SIGNAL PROCESSING (P2) — Dev D

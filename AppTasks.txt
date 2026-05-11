@@ -13,11 +13,13 @@ Developer roles (suggested):
 
 Dev A – BLE & Data Pipeline (Stiina)
 
-Dev B – Domain Models & Storage
+Dev B – Domain Models & Storage (Naomichi)
 
-Dev C – UI & Visualization
+Dev C – UI & Visualization (Stiina)
 
-Dev D – Signal Processing
+Dev D – Signal Processing (Julian)
+
+ESP32 Dev (Julian)
 
 Each task includes a short explanation so junior developers know exactly what to do.
 
@@ -120,6 +122,28 @@ Use a List<EcgSample> with modular indexing.
 [x] Ensure thread‑safe operations
 
 [x] Create integration test for complete pipeline
+
+[x] Validate parser with real ESP32 device data
+
+[x] Implement BLE timestamp synchronization with ESP32
+
+4.3 ESP32 Firmware (ESP32 Dev)
+[ ] Implement BLE GATT server with ECG service/characteristic
+[ ] Add timestamp synchronization (receive 4-byte timestamp from app)
+[ ] Add start/stop command handling (0x01=start, 0x00=stop)
+[ ] Implement ECG packet transmission (47-byte packets via notifications)
+[ ] Integrate with actual ECG sensor (replace sample data with ADC readings)
+[ ] Add lead-off detection and status flags
+
+4.4 BLE Connection Testing (Dev A)
+[x] Implement BLE test interface in app.dart
+[x] Add platform permissions (Android + iOS)
+[x] Test automatic timestamp sync and start command
+[x] Verify packet reception and status display
+[x] Build and validate APK
+[ ] Physical device testing (Android/iOS + ESP32)
+[ ] Implement connection persistence
+[ ] Add device pairing/forget functionality
 
 ============================================================
 5. SIGNAL PROCESSING (P2) — Dev D

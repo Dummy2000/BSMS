@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 import 'package:flutter_reactive_ble/flutter_reactive_ble.dart';
 import 'ecg_packet.dart';
 import 'ecg_packet_parser.dart';
@@ -6,7 +7,13 @@ import 'ble_service.dart';
 import 'ble_device_connector.dart';
 
 /// Service for handling ECG data via BLE from ESP32 device.
-/// Manages the complete BLE pipeline: scan → connect → subscribe → parse.
+/// Manages the complete BLE pipeline: scan → connect → sync timestamp → start transmission → subscribe → parse.
+///
+/// **BLE Protocol:**
+/// - Timestamp sync: App sends current time (ms since epoch) as 4-byte little-endian uint32_t
+/// - Start command: 0x01 byte to begin ECG data transmission
+/// - Stop command: 0x00 byte to halt ECG data transmission
+/// - Data packets: 47-byte ECG packets received via notifications
 class EcgBleService {
   static const String deviceName = 'EKG-Holter';
   static const String serviceUuid = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
@@ -23,6 +30,8 @@ class EcgBleService {
 
   final StreamController<EcgPacket> _packetController = StreamController<EcgPacket>.broadcast();
 
+  String? _connectedDeviceId;
+
   EcgBleService(this._parser)
       : _bleService = BleService(),
         _connector = BleDeviceConnector();
@@ -30,7 +39,8 @@ class EcgBleService {
   /// Stream of parsed ECG packets from the BLE device.
   Stream<EcgPacket> get ecgPackets => _packetController.stream;
 
-  /// Starts the BLE pipeline: scan for device, connect, and subscribe to notifications.
+  /// Starts the BLE pipeline: scan for device, connect, synchronize timestamp,
+  /// start ECG transmission, and subscribe to notifications.
   Future<void> start() async {
     try {
       // Start scanning for devices
@@ -53,7 +63,8 @@ class EcgBleService {
     }
   }
 
-  /// Connects to the specified device and subscribes to ECG notifications.
+  /// Connects to the specified device, synchronizes timestamp with ESP32,
+  /// starts ECG data transmission, and subscribes to notifications.
   Future<void> _connectToDevice(String deviceId) async {
     try {
       // Connect to device
@@ -62,8 +73,19 @@ class EcgBleService {
           print('Connection state: ${connectionState.connectionState}');
 
           if (connectionState.connectionState == DeviceConnectionState.connected) {
+            _connectedDeviceId = deviceId;
+
+            // Synchronize timestamp with ESP32
+            final currentTime = DateTime.now().millisecondsSinceEpoch;
+            await sendTimestamp(deviceId, currentTime);
+
+            // Start ECG data transmission
+            await startEcgTransmission(deviceId);
+
+            // Subscribe to notifications
             await _subscribeToNotifications(deviceId);
           } else if (connectionState.connectionState == DeviceConnectionState.disconnected) {
+            _connectedDeviceId = null;
             print('Device disconnected');
             _packetController.addError('Device disconnected');
           }
@@ -112,18 +134,88 @@ class EcgBleService {
     }
   }
 
-  /// Stops the BLE pipeline and disconnects from device.
-  void stop() {
+  /// Stops ECG transmission, cancels subscriptions, and disconnects from device.
+  Future<void> stop() async {
+    try {
+      // Stop ECG transmission if connected
+      if (_connectedDeviceId != null) {
+        await stopEcgTransmission(_connectedDeviceId!);
+        print('ECG transmission stopped');
+      }
+    } catch (e) {
+      print('Error stopping ECG transmission: $e');
+    }
+
     _notificationSubscription?.cancel();
     _connectionSubscription?.cancel();
     _scanSubscription?.cancel();
     _connector.disconnect();
     _bleService.stopScan();
     _packetController.close();
+    _connectedDeviceId = null;
 
     print('BLE service stopped');
   }
 
-  /// Returns true if currently connected to ECG device.
-  bool get isConnected => _connectionSubscription != null;
+  /// Sends current timestamp to ESP32 for synchronization.
+  /// ESP32 uses this timestamp as base for ECG packet timestamps.
+  Future<void> sendTimestamp(String deviceId, int timestampMs) async {
+    try {
+      final characteristic = QualifiedCharacteristic(
+        serviceId: Uuid.parse(serviceUuid),
+        characteristicId: Uuid.parse(characteristicUuid),
+        deviceId: deviceId,
+      );
+
+      // Send timestamp as 4-byte little-endian uint32_t
+      final timestampBytes = ByteData(4);
+      timestampBytes.setUint32(0, timestampMs, Endian.little);
+      final data = timestampBytes.buffer.asUint8List();
+
+      await _ble.writeCharacteristicWithResponse(characteristic, value: data);
+      print('Timestamp sent to ESP32: $timestampMs ms');
+    } catch (e) {
+      print('Failed to send timestamp: $e');
+      throw Exception('Failed to send timestamp to ESP32: $e');
+    }
+  }
+
+  /// Sends start command to ESP32 to begin ECG data transmission.
+  Future<void> startEcgTransmission(String deviceId) async {
+    try {
+      final characteristic = QualifiedCharacteristic(
+        serviceId: Uuid.parse(serviceUuid),
+        characteristicId: Uuid.parse(characteristicUuid),
+        deviceId: deviceId,
+      );
+
+      // Send start command (0x01)
+      await _ble.writeCharacteristicWithResponse(characteristic, value: [0x01]);
+      print('ECG transmission start command sent to ESP32');
+    } catch (e) {
+      print('Failed to send start command: $e');
+      throw Exception('Failed to start ECG transmission: $e');
+    }
+  }
+
+  /// Sends stop command to ESP32 to halt ECG data transmission.
+  Future<void> stopEcgTransmission(String deviceId) async {
+    try {
+      final characteristic = QualifiedCharacteristic(
+        serviceId: Uuid.parse(serviceUuid),
+        characteristicId: Uuid.parse(characteristicUuid),
+        deviceId: deviceId,
+      );
+
+      // Send stop command (0x00)
+      await _ble.writeCharacteristicWithResponse(characteristic, value: [0x00]);
+      print('ECG transmission stop command sent to ESP32');
+    } catch (e) {
+      print('Failed to send stop command: $e');
+      throw Exception('Failed to stop ECG transmission: $e');
+    }
+  }
+
+  /// Returns true if currently connected to ECG device and device ID is tracked.
+  bool get isConnected => _connectedDeviceId != null;
 }

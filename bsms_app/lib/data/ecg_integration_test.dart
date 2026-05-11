@@ -143,6 +143,75 @@ class EcgIntegrationTest {
     }
   }
 
+  /// Tests packet parsing with real ESP32 device data.
+  void testRealEsp32Data() {
+    print('\n🧪 Testing with real ESP32 device data...');
+
+    // Real ESP32 packet data (hex strings from device)
+    final esp32Packets = [
+      // Packet 1
+      '40 E2 01 00 48 14 00 90 33 9F 33 96 33 A1 33 96 33 84 33 82 34 55 35 0B 36 8F 36 B3 36 98 36 28 36 63 35 87 34 84 33 7C 33 8F 33 8D 33 97 33',
+      // Packet 2
+      '68 E2 01 00 48 14 00 A6 33 95 33 97 33 8F 33 7B 33 88 33 87 33 8C 33 A2 33 99 33 9B 33 9A 33 83 33 4E 34 DF 34 10 35 F2 34 5F 34 9A 33 A4 33',
+      // Packet 3
+      '90 E2 01 00 48 14 00 8E 33 8B 33 31 31 BA 52 31 6C 02 4B BB 24 D6 2B A4 31 90 33 91 33 7C 33 84 33 8D 33 8A 33 A0 33 9F 33 96 33 9B 33 85 33',
+    ];
+
+    for (int i = 0; i < esp32Packets.length; i++) {
+      print('\n📦 Testing ESP32 Packet ${i + 1}...');
+
+      try {
+        // Convert hex string to Uint8List
+        final data = _hexStringToUint8List(esp32Packets[i]);
+
+        // Parse the packet
+        final packet = _parser.parse(data);
+
+        print('✅ Packet ${i + 1} parsed successfully:');
+        print('   Timestamp: ${packet.timestamp} (${packet.timestamp.millisecondsSinceEpoch} ms)');
+        print('   Heart Rate: ${packet.heartRate} BPM');
+        print('   Sample Count: ${packet.samples.length}');
+        print('   Status Flags: 0x${packet.flags.toRadixString(16).padLeft(2, '0')}');
+
+        // Convert to individual samples
+        final samples = _parser.packetToSamples(packet);
+        print('✅ Converted to ${samples.length} individual samples');
+        print('   Sample range: ${samples.first.value} - ${samples.last.value}');
+        print('   Time range: ${samples.first.timestampMs} - ${samples.last.timestampMs} ms');
+
+        // Validate sample count
+        if (packet.samples.length != 20) {
+          print('❌ Expected 20 samples, got ${packet.samples.length}');
+        }
+
+        // Validate timestamps are sequential (2ms intervals)
+        for (int j = 1; j < samples.length; j++) {
+          final expectedTime = samples[j-1].timestampMs + 2;
+          if (samples[j].timestampMs != expectedTime) {
+            print('❌ Timestamp discontinuity at sample $j: expected $expectedTime, got ${samples[j].timestampMs}');
+          }
+        }
+
+      } catch (e) {
+        print('❌ Failed to parse ESP32 packet ${i + 1}: $e');
+      }
+    }
+
+    print('\n✅ Real ESP32 data validation completed');
+  }
+
+  /// Converts a hex string (space-separated bytes) to Uint8List.
+  Uint8List _hexStringToUint8List(String hexString) {
+    final hexBytes = hexString.split(' ').where((s) => s.isNotEmpty).toList();
+    final bytes = <int>[];
+
+    for (final hexByte in hexBytes) {
+      bytes.add(int.parse(hexByte, radix: 16));
+    }
+
+    return Uint8List.fromList(bytes);
+  }
+
   /// Tests ring buffer functionality.
   void testRingBuffer() {
     print('\n🧪 Testing ring buffer...');
@@ -255,6 +324,7 @@ class EcgIntegrationTest {
 
     await initializeWithoutBle();
     testPacketParsing();
+    testRealEsp32Data();
     testRingBuffer();
     await testDataPipeline();
 

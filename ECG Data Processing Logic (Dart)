@@ -1,0 +1,85 @@
+import 'dart:typed_data';
+import 'dart:async';
+
+/// Represents a single ECG data packet (47 bytes).
+/// Based on the protocol: 4-byte timestamp + 42-byte ECG data (21 samples) + 1-byte status.
+class EcgPacket {
+  final int timestamp;
+  final List<int> signals;
+  final int status;
+
+  EcgPacket({
+    required this.timestamp,
+    required this.signals,
+    required this.status,
+  });
+
+  /// Factory constructor to parse raw binary data into an EcgPacket object.
+  /// Expects a 47-byte Uint8List.
+  factory EcgPacket.fromBinary(Uint8List bytes) {
+    if (bytes.length != 47) {
+      throw Exception("Invalid packet size: ${bytes.length} bytes (Expected: 47)");
+    }
+
+    final ByteData data = ByteData.sublistView(bytes);
+
+    // 1. Extract Timestamp (Offset: 0, 4 bytes, Little Endian)
+    final int ts = data.getUint32(0, Endian.little);
+
+    // 2. Extract 21 ECG samples (Offset: 4, 2 bytes each, Little Endian)
+    final List<int> sgs = [];
+    for (int i = 0; i < 21; i++) {
+      int offset = 4 + (i * 2);
+      sgs.add(data.getInt16(offset, Endian.little));
+    }
+
+    // 3. Extract Status Byte (Offset: 46, 1 byte)
+    final int st = data.getUint8(46);
+
+    return EcgPacket(timestamp: ts, signals: sgs, status: st);
+  }
+}
+
+/// Handles the stream of incoming binary data and prepares it for visualization.
+class EcgDataProcessor {
+  // Stream controller to broadcast ECG values to the UI/Graph
+  final _signalStreamController = StreamController<int>.broadcast();
+  Stream<int> get signalStream => _signalStreamController.stream;
+
+  // Variables for jitter and latency monitoring
+  int? _lastTimestamp;
+
+  /// Processes raw binary input (e.g., from Bluetooth or SD card).
+  void handleRawData(Uint8List rawBytes) {
+    try {
+      final packet = EcgPacket.fromBinary(rawBytes);
+
+      // Distribute each sample in the packet to the stream for real-time plotting
+      for (var value in packet.signals) {
+        _signalStreamController.add(value);
+      }
+
+      _monitorLatency(packet.timestamp);
+    } catch (e) {
+      // Standard error logging for debugging during development
+      print("Error decoding packet: $e");
+    }
+  }
+
+  /// Monitors interval between packets to detect potential hardware/transmission lag.
+  void _monitorLatency(int currentTimestamp) {
+    if (_lastTimestamp != null) {
+      final int interval = currentTimestamp - _lastTimestamp!;
+      // Expected interval is 40ms for 500Hz sampling (21 samples/packet)
+      if (interval > 45 || interval < 35) {
+        print("Warning: Jitter detected. Interval: $interval ms");
+      }
+    }
+    _lastTimestamp = currentTimestamp;
+  }
+
+  /// Clean up the controller when the processor is no longer needed.
+  void dispose() {
+    _signalStreamController.close();
+  }
+}

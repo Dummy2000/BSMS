@@ -18,19 +18,19 @@ The app is designed to connect to an ESP32-based `EKG-Holter` BLE device, parse 
 1. Open a terminal in `bsms_app`
 2. Run:
 
-```bash
+```
 flutter pub get
 ```
 
 3. Verify static analysis:
 
-```bash
+```
 flutter analyze
 ```
 
 4. Run tests:
 
-```bash
+```
 flutter test test/integration_test.dart
 ```
 
@@ -38,20 +38,16 @@ flutter test test/integration_test.dart
 
 ### Android
 
-```bash
+```
 flutter run
 ```
 
 ### iOS (macOS only)
 
-```bash
-flutter run
+If you are building for iOS, use Xcode or Flutter on macOS.
+
 ```
-
-Or to build without code signing:
-
-```bash
-flutter build ios --no-codesign
+flutter run
 ```
 
 ## Project Notes

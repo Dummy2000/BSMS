@@ -1,0 +1,38 @@
+# Normalize line endings for text files.
+# This prevents LF/CRLF warnings on Windows and keeps repository content consistent.
+* text=auto
+
+# Force LF for source files in the repo.
+*.dart text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.xml text eol=lf
+*.plist text eol=lf
+*.sh text eol=lf
+*.cmake text eol=lf
+*.cc text eol=lf
+*.c text eol=lf
+*.h text eol=lf
+*.swift text eol=lf
+
+# Binary files should not be converted.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.tif binary
+*.tiff binary
+*.otf binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.zip binary
+*.jar binary
+*.tar binary
+*.gz binary
+*.bin binary

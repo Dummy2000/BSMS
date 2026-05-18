@@ -79,7 +79,7 @@ Your BSMS ECG application is now **fully prepared for Bluetooth LE connection te
 ### Steps:
 
 **1. Install and Launch App**
-```bash
+```
 # Android emulator (if available)
 flutter run --debug -d <emulator_id>
 

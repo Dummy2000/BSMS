@@ -212,10 +212,20 @@ Updated the developer log with the latest status before push, including:
 - iOS Info.plist Bluetooth permission text in `bsms_app/ios/Runner/Info.plist`
 - New BLE testing documentation: `BLE_TESTING_GUIDE.md`, `BLUETOOTH_CONNECTION_STATUS.md`, `QUICK_START_BLE.md`
 - ESP32 firmware and README updates in `ESP32_Blink/src/main.cpp` and `ESP32_Blink/README.md`
+- Real-time ECG processor and chart visualization in `bsms_app/lib/data/ecg_data_processor.dart` and `bsms_app/lib/presentation/widgets/ecg_chart.dart`
+- Storage support via `path_provider` and live chart UI via `syncfusion_flutter_charts`
 
 Repository is now ready for commit and push.
 
 **Next:** Physical device testing with real ESP32!
+
+## Step 15 – Real-Time ECG Visualization & Storage
+
+Implemented `EcgDataProcessor` for raw ECG packet processing, sample stream emission, and buffered CSV save-to-file support.
+
+Added `EcgChartView` in `bsms_app/lib/presentation/widgets/ecg_chart.dart` using `syncfusion_flutter_charts` for live waveform display.
+
+Updated dependencies for `path_provider` and `syncfusion_flutter_charts` to support storage and visualization features.
 
 ---
 

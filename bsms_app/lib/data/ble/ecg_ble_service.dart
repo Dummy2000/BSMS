@@ -31,6 +31,7 @@ class EcgBleService {
   final StreamController<EcgPacket> _packetController = StreamController<EcgPacket>.broadcast();
 
   String? _connectedDeviceId;
+  final List<int> _incomingBuffer = [];
 
   EcgBleService(this._parser)
       : _bleService = BleService(),
@@ -42,14 +43,29 @@ class EcgBleService {
   /// Starts the BLE pipeline: scan for device, connect, synchronize timestamp,
   /// start ECG transmission, and subscribe to notifications.
   Future<void> start() async {
+    if (_connectedDeviceId != null) {
+      print('Already connected');
+      return;
+    }
+
+    // Cancel any existing scan
+    await _scanSubscription?.cancel();
+    _scanSubscription = null;
+
     try {
       // Start scanning for devices
       _scanSubscription = _bleService.scanForDevices().listen(
         (device) async {
           if (device.name == deviceName) {
             print('Found ECG device: ${device.name} (${device.id})');
+            
+            // Crucial: Stop scanning and wait a moment before connecting
+            await _scanSubscription?.cancel();
+            _scanSubscription = null;
+            _bleService.stopScan();
+            
+            await Future.delayed(const Duration(milliseconds: 500));
             await _connectToDevice(device.id);
-            _bleService.stopScan(); // Stop scanning once we found our device
           }
         },
         onError: (error) {
@@ -66,24 +82,50 @@ class EcgBleService {
   /// Connects to the specified device, synchronizes timestamp with ESP32,
   /// starts ECG data transmission, and subscribes to notifications.
   Future<void> _connectToDevice(String deviceId) async {
+    if (_connectedDeviceId != null) return;
+
     try {
+      // Cancel any existing connection subscription
+      await _connectionSubscription?.cancel();
+      _connectionSubscription = null;
+
       // Connect to device
       _connectionSubscription = _connector.connectTo(deviceId).listen(
         (connectionState) async {
           print('Connection state: ${connectionState.connectionState}');
 
-          if (connectionState.connectionState == DeviceConnectionState.connected) {
+          if (connectionState.connectionState == DeviceConnectionState.connected && _connectedDeviceId == null) {
             _connectedDeviceId = deviceId;
 
-            // Synchronize timestamp with ESP32
-            final currentTime = DateTime.now().millisecondsSinceEpoch;
-            await sendTimestamp(deviceId, currentTime);
+            try {
+              // Request larger MTU to avoid packet fragmentation (47 bytes + headers)
+              print('Requesting MTU change...');
+              await _ble.requestMtu(deviceId: deviceId, mtu: 128);
+              
+              // Give services a moment to be discovered properly
+              await Future.delayed(const Duration(seconds: 1));
 
-            // Start ECG data transmission
-            await startEcgTransmission(deviceId);
+              // Attempt to synchronize timestamp, but don't stop if it fails
+              try {
+                final currentTime = DateTime.now().millisecondsSinceEpoch;
+                await sendTimestamp(deviceId, currentTime);
+              } catch (e) {
+                print('Optional timestamp sync failed: $e');
+              }
 
-            // Subscribe to notifications
-            await _subscribeToNotifications(deviceId);
+              // Attempt to start transmission, but don't stop if it fails
+              try {
+                await startEcgTransmission(deviceId);
+              } catch (e) {
+                print('Optional start command failed: $e');
+              }
+
+              // Subscribe to notifications - THIS IS THE MOST CRITICAL PART
+              await _subscribeToNotifications(deviceId);
+            } catch (e) {
+              print('Critical error during notification subscription: $e');
+              _packetController.addError('Setup error: $e');
+            }
           } else if (connectionState.connectionState == DeviceConnectionState.disconnected) {
             _connectedDeviceId = null;
             print('Device disconnected');
@@ -113,9 +155,17 @@ class EcgBleService {
       _notificationSubscription = _ble.subscribeToCharacteristic(characteristic).listen(
         (data) {
           try {
-            // Parse raw bytes into ECG packet
-            final packet = _parser.parse(data);
-            _packetController.add(packet);
+            // Accumulate data in buffer to handle fragmented BLE packets
+            _incomingBuffer.addAll(data);
+            
+            // Process all full packets in the buffer
+            while (_incomingBuffer.length >= EcgPacketParser.packetSize) {
+              final packetData = _incomingBuffer.sublist(0, EcgPacketParser.packetSize);
+              _incomingBuffer.removeRange(0, EcgPacketParser.packetSize);
+              
+              final packet = _parser.parse(packetData);
+              _packetController.add(packet);
+            }
           } catch (e) {
             print('Failed to parse ECG packet: $e');
             _packetController.addError('Parse error: $e');
@@ -151,7 +201,6 @@ class EcgBleService {
     _scanSubscription?.cancel();
     _connector.disconnect();
     _bleService.stopScan();
-    _packetController.close();
     _connectedDeviceId = null;
 
     print('BLE service stopped');
@@ -160,23 +209,31 @@ class EcgBleService {
   /// Sends current timestamp to ESP32 for synchronization.
   /// ESP32 uses this timestamp as base for ECG packet timestamps.
   Future<void> sendTimestamp(String deviceId, int timestampMs) async {
+    final characteristic = QualifiedCharacteristic(
+      serviceId: Uuid.parse(serviceUuid),
+      characteristicId: Uuid.parse(characteristicUuid),
+      deviceId: deviceId,
+    );
+
+    // Send timestamp as 4-byte little-endian uint32_t
+    final timestampBytes = ByteData(4);
+    timestampBytes.setUint32(0, timestampMs, Endian.little);
+    final data = timestampBytes.buffer.asUint8List();
+
     try {
-      final characteristic = QualifiedCharacteristic(
-        serviceId: Uuid.parse(serviceUuid),
-        characteristicId: Uuid.parse(characteristicUuid),
-        deviceId: deviceId,
-      );
-
-      // Send timestamp as 4-byte little-endian uint32_t
-      final timestampBytes = ByteData(4);
-      timestampBytes.setUint32(0, timestampMs, Endian.little);
-      final data = timestampBytes.buffer.asUint8List();
-
-      await _ble.writeCharacteristicWithResponse(characteristic, value: data);
-      print('Timestamp sent to ESP32: $timestampMs ms');
+      // Try writing without response first (more common for ESP32)
+      await _ble.writeCharacteristicWithoutResponse(characteristic, value: data);
+      print('Timestamp sent to ESP32: $timestampMs ms (no response)');
     } catch (e) {
-      print('Failed to send timestamp: $e');
-      throw Exception('Failed to send timestamp to ESP32: $e');
+      print('Failed to send timestamp without response: $e. Trying with response...');
+      try {
+        // Fallback to writing with response
+        await _ble.writeCharacteristicWithResponse(characteristic, value: data);
+        print('Timestamp sent to ESP32: $timestampMs ms (with response)');
+      } catch (e2) {
+        print('Failed to send timestamp with response fallback: $e2');
+        throw Exception('Failed to send timestamp to ESP32: $e2');
+      }
     }
   }
 
@@ -190,7 +247,7 @@ class EcgBleService {
       );
 
       // Send start command (0x01)
-      await _ble.writeCharacteristicWithResponse(characteristic, value: [0x01]);
+      await _ble.writeCharacteristicWithoutResponse(characteristic, value: [0x01]);
       print('ECG transmission start command sent to ESP32');
     } catch (e) {
       print('Failed to send start command: $e');
@@ -208,7 +265,7 @@ class EcgBleService {
       );
 
       // Send stop command (0x00)
-      await _ble.writeCharacteristicWithResponse(characteristic, value: [0x00]);
+      await _ble.writeCharacteristicWithoutResponse(characteristic, value: [0x00]);
       print('ECG transmission stop command sent to ESP32');
     } catch (e) {
       print('Failed to send stop command: $e');

@@ -19,11 +19,6 @@ class BleDeviceConnector {
       connectionTimeout: const Duration(seconds: 5),
     );
 
-    // Store subscription so we can cancel it later
-    _connectionSubscription = connectionStream.listen((event) {
-      // You can add logging here if needed
-    });
-
     return connectionStream;
   }
 

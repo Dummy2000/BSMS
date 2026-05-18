@@ -23,6 +23,8 @@ ESP32 Dev (Julian)
 
 Each task includes a short explanation so junior developers know exactly what to do.
 
+Updated: 18 May 2026 — reviewed against repository sources.
+
 ============================================================
 1. PROJECT SETUP (P1)
 ============================================================
@@ -43,7 +45,7 @@ Each task includes a short explanation so junior developers know exactly what to
 
 [x] Define feature branch naming (feature/<task-name>)
 
-[x] Add PR template
+[ ] Add PR template
 
 [x] Add .gitignore
 
@@ -51,15 +53,15 @@ Each task includes a short explanation so junior developers know exactly what to
 2. DOMAIN LAYER (P1) — Dev B
 ============================================================
 2.1 Core Models
-[ ] Implement EcgSample
+[x] Implement EcgSample
 
-[ ] Implement HeartRateValue
+[x] Implement HeartRateValue
 
-[ ] Implement EcgEventType
+[x] Implement EcgEventType
 
-[ ] Implement EcgEvent
+[x] Implement EcgEvent
 
-[ ] Implement EcgSession
+[x] Implement EcgSession
 
 Instructions:  
 Each model should be a simple Dart class with final fields and no logic.
@@ -127,11 +129,13 @@ Use a List<EcgSample> with modular indexing.
 
 [x] Implement BLE timestamp synchronization with ESP32
 
+[x] Implement CSV logging buffer and file save for ECG stream
+
 4.3 ESP32 Firmware (ESP32 Dev)
-[ ] Implement BLE GATT server with ECG service/characteristic
-[ ] Add timestamp synchronization (receive 4-byte timestamp from app)
-[ ] Add start/stop command handling (0x01=start, 0x00=stop)
-[ ] Implement ECG packet transmission (47-byte packets via notifications)
+[x] Implement BLE GATT server with ECG service/characteristic
+[x] Add timestamp synchronization (receive 4-byte timestamp from app)
+[x] Add start/stop command handling (0x01=start, 0x00=stop)
+[x] Implement ECG packet transmission (47-byte packets via notifications)
 [ ] Integrate with actual ECG sensor (replace sample data with ADC readings)
 [ ] Add lead-off detection and status flags
 
@@ -237,6 +241,10 @@ UI should never contain business logic.
 [ ] Lead‑off warning
 
 [ ] Event markers
+
+8.3 Real-time Chart Component
+[x] Implement Syncfusion real-time ECG waveform chart widget
+[ ] Integrate chart widget into live ECG screen
 
 ============================================================
 9. QA & TESTING (P2) — All Devs

@@ -38,6 +38,12 @@ dependencies:
   # BLE library for scanning, connecting, and receiving ECG packets
   flutter_reactive_ble: ^5.0.2
 
+  # Storage helper for saving ECG CSV logs to device storage
+  path_provider: ^2.0.15
+
+  # Charting library for real-time ECG visualization
+  syncfusion_flutter_charts: ^33.2.6
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

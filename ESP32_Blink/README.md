@@ -43,7 +43,7 @@ struct __attribute__((packed)) EcgPacket {
 2. Open the project folder in PlatformIO
 3. Connect ESP32 board via USB
 4. Build and upload the firmware:
-   ```bash
+   ```
    pio run -t upload
    ```
 

@@ -47,11 +47,17 @@ class EcgFilter {
     final a2 = (1.0 - sq2k + k2) / norm;
 
     final y = List<double>.filled(x.length, 0.0);
-    double x1 = 0, x2 = 0, y1 = 0, y2 = 0;
+    // Pre-warm: assume signal starts at constant x[0].
+    // For a high-pass filter b0+b1+b2 = 0, so the first output is immediately 0
+    // and no DC step-transient occurs. The low-pass stage receives the near-zero
+    // HP output, so its zero-initialization is already correct.
+    double x1 = x.isNotEmpty ? x[0] : 0.0;
+    double x2 = x.isNotEmpty ? x[0] : 0.0;
+    double y1 = 0, y2 = 0;
     for (int i = 0; i < x.length; i++) {
       final xi = x[i];
       final yi = b0 * xi + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2;
-      y[i] = yi + 2048.0; // restore baseline
+      y[i] = yi;
       x2 = x1; x1 = xi;
       y2 = y1; y1 = yi;
     }

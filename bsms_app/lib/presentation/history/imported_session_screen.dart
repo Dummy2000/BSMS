@@ -17,7 +17,9 @@ class ImportedSessionScreen extends StatefulWidget {
 }
 
 class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
-  static const int _windowSize = 2500; // 5 s at 500 Hz
+  static const int _minWindowSize = 250;   // 0.5 s
+  static const int _maxWindowSize = 10000; // 20 s
+  static const int _defaultWindowSize = 2500; // 5 s
 
   late final List<EcgSample> _filtered;
   late final List<int> _rPeaks;
@@ -25,6 +27,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
   late final double _meanBpm;
 
   int _windowStart = 0;
+  int _windowSize = _defaultWindowSize;
   bool _showFiltered = true;
 
   @override
@@ -92,8 +95,6 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                   title: AxisTitle(text: 'Zeit (ms)'),
                 ),
                 primaryYAxis: NumericAxis(
-                  minimum: 0,
-                  maximum: 4095,
                   title: AxisTitle(text: 'ADC'),
                 ),
                 series: <CartesianSeries>[
@@ -124,11 +125,42 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
               ),
             ),
           ),
-          if (_maxStart > 0)
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: Row(
-                children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            child: Row(
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.zoom_in),
+                  iconSize: 20,
+                  tooltip: 'Vergrößern',
+                  onPressed: _windowSize > _minWindowSize
+                      ? () => setState(() {
+                            _windowSize = (_windowSize ~/ 2).clamp(
+                                _minWindowSize, _maxWindowSize);
+                            _windowStart =
+                                _windowStart.clamp(0, _maxStart);
+                          })
+                      : null,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.zoom_out),
+                  iconSize: 20,
+                  tooltip: 'Verkleinern',
+                  onPressed: _windowSize < _maxWindowSize
+                      ? () => setState(() {
+                            _windowSize = (_windowSize * 2).clamp(
+                                _minWindowSize, _maxWindowSize);
+                            _windowStart =
+                                _windowStart.clamp(0, _maxStart);
+                          })
+                      : null,
+                ),
+                Text(
+                  '${(_windowSize / 500).toStringAsFixed(1)}s',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                if (_maxStart > 0) ...[
+                  const SizedBox(width: 4),
                   Text(
                     _msToTime(session.samples[_windowStart].timestampMs -
                         session.samples.first.timestampMs),
@@ -139,16 +171,19 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                       value: _windowStart.toDouble(),
                       min: 0,
                       max: _maxStart.toDouble(),
-                      onChanged: (v) => setState(() => _windowStart = v.toInt()),
+                      onChanged: (v) =>
+                          setState(() => _windowStart = v.toInt()),
                     ),
                   ),
                   Text(
                     _formatDuration(session.duration),
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
-                ],
-              ),
+                ] else
+                  const Spacer(),
+              ],
             ),
+          ),
           if (_events.isNotEmpty) _EventList(events: _events),
           if (session.skippedPackets > 0)
             Padding(

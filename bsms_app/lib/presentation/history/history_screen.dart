@@ -40,6 +40,15 @@ class _HistoryScreenState extends State<HistoryScreen> {
       }
 
       setState(() {});
+    } on FormatException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.message),
+            backgroundColor: Theme.of(context).colorScheme.error,
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _importing = false);
     }

@@ -36,7 +36,7 @@ dependencies:
   cupertino_icons: ^1.0.8
 
   # BLE library for scanning, connecting, and receiving ECG packets
-  flutter_reactive_ble: ^5.0.2
+  flutter_reactive_ble: ^5.5.0
 
   # Storage helper for saving ECG CSV logs to device storage
   path_provider: ^2.0.15

@@ -44,6 +44,9 @@ dependencies:
   # Charting library for real-time ECG visualization
   syncfusion_flutter_charts: ^33.2.6
 
+  # Native file picker dialog for importing SD card binary files
+  file_picker: ^8.0.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

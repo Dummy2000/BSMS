@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import '../data/ble/ecg_ble_service.dart';
 import '../data/ble/ecg_packet_parser.dart';
 import '../data/ble/ecg_packet.dart';
+import '../data/storage/imported_session_repository.dart';
+import '../presentation/history/history_screen.dart';
 
 /// Main application widget for the BSMS ECG monitoring system.
 /// 
@@ -66,6 +68,7 @@ class BsmsHomePage extends StatefulWidget {
 class _BsmsHomePageState extends State<BsmsHomePage> {
   late final EcgBleService _bleService;
   late final EcgPacketParser _parser;
+  final ImportedSessionRepository _importedSessions = ImportedSessionRepository();
 
   String _connectionStatus = 'Not connected';
   int _packetCount = 0;
@@ -138,6 +141,18 @@ class _BsmsHomePageState extends State<BsmsHomePage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('BSMS ECG Monitor'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.history),
+            tooltip: 'Importierte Aufnahmen',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => HistoryScreen(repository: _importedSessions),
+              ),
+            ),
+          ),
+        ],
       ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),

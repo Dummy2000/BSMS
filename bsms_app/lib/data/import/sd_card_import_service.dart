@@ -5,12 +5,11 @@ import '../../domain/ecg_sample.dart';
 import '../../domain/models/imported_session.dart';
 
 class SdCardImportService {
-  final EcgPacketParser _parser = EcgPacketParser();
-
   /// Opens a file picker dialog and parses the selected binary file.
   ///
-  /// Returns null if the user cancels or the file is unreadable.
-  /// Throws [FormatException] if the file size is not a multiple of 47 bytes.
+  /// Supports both the legacy 47-byte format (uint32 block counter in header)
+  /// and the new 51-byte format (uint64 real timestamp in header).
+  /// Throws [FormatException] if the file size matches neither format.
   Future<ImportedSession?> importFromFile() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.any,
@@ -24,64 +23,99 @@ class SdCardImportService {
     final bytes = file.bytes;
     if (bytes == null || bytes.isEmpty) return null;
 
-    return _parseBytes(
-      bytes: bytes,
-      fileName: file.name,
-    );
+    return _parseBytes(bytes: bytes, fileName: file.name);
   }
 
   ImportedSession _parseBytes({
     required Uint8List bytes,
     required String fileName,
   }) {
-    const packetSize = EcgPacketParser.packetSize;
-    const samplesPerPacket = EcgPacketParser.samplesPerPacket;
-    const sampleIntervalMs = EcgPacketParser.sampleIntervalMs;
+    const newSize    = EcgPacketParser.packetSize;        // 51
+    const legacySize = EcgPacketParser.packetSizeLegacy;  // 47
+    const samplesPerPacket  = EcgPacketParser.samplesPerPacket;
+    const sampleIntervalMs  = EcgPacketParser.sampleIntervalMs;
 
-    if (bytes.length % packetSize != 0) {
+    final isNew    = bytes.length % newSize    == 0;
+    final isLegacy = bytes.length % legacySize == 0;
+
+    if (!isNew && !isLegacy) {
       throw FormatException(
         'Datei "$fileName" ist beschädigt: '
-        '${bytes.length} Bytes ist nicht durch $packetSize teilbar '
-        '(Rest: ${bytes.length % packetSize} Bytes).',
+        '${bytes.length} Bytes passt weder zum neuen Format ($newSize Bytes/Block) '
+        'noch zum alten Format ($legacySize Bytes/Block).',
       );
     }
 
-    final totalBlocks = bytes.length ~/ packetSize;
-    final samples = <EcgSample>[];
-    int skippedBlocks = 0;
-    int missingPackets = 0;
+    // New format: bytes 0–7 = uint64 real timestamp, samples start at byte 11.
+    // Legacy format: bytes 0–3 = uint32 block counter, samples start at byte 7.
+    final blockSize     = isNew ? newSize    : legacySize;
+    final sampleOffset  = isNew ? 11         : 7;
+
+    final totalBlocks    = bytes.length ~/ blockSize;
+    final samples        = <EcgSample>[];
+    final hrData         = <HrDataPoint>[];
+    final leadOffIntervals = <LeadOffInterval>[];
+    int skippedBlocks    = 0;
+    int missingPackets   = 0;
     int? lastCounter;
+    bool inLeadOff       = false;
+    int  leadOffStart    = 0;
 
     final bd = ByteData.sublistView(bytes);
 
     for (int blockIdx = 0; blockIdx < totalBlocks; blockIdx++) {
-      final offset = blockIdx * packetSize;
+      final offset = blockIdx * blockSize;
 
-      // Counter from header bytes 0–3 for gap detection.
+      // Counter / block index in first 4 bytes — used only for gap detection.
       final counter = bd.getUint32(offset, Endian.little);
       if (lastCounter != null && counter != lastCounter + 1) {
         missingPackets += (counter - lastCounter - 1).abs();
       }
       lastCounter = counter;
 
-      final packetBytes = bytes.sublist(offset, offset + packetSize);
+      // Header layout (both formats):
+      //   sampleOffset - 3 = hr_avg
+      //   sampleOffset - 2 = sample_count
+      //   sampleOffset - 1 = status_flags
+      final hrAvg      = bd.getUint8(offset + sampleOffset - 3);
+      final sampleCount = bd.getUint8(offset + sampleOffset - 2);
+      final flags      = bd.getUint8(offset + sampleOffset - 1);
 
-      try {
-        // Reuse BLE parser for sample extraction (bytes 7–46).
-        // Timestamps from packet.timestamp are intentionally ignored here:
-        // SD-card header bytes 0–3 are a block counter, not a real timestamp.
-        final packet = _parser.parse(packetBytes);
-
-        for (int i = 0; i < packet.samples.length; i++) {
-          final sampleIdx = blockIdx * samplesPerPacket + i;
-          samples.add(EcgSample(
-            value: packet.samples[i],
-            timestampMs: sampleIdx * sampleIntervalMs,
-          ));
-        }
-      } catch (_) {
+      if (sampleCount != samplesPerPacket) {
         skippedBlocks++;
+        continue;
       }
+
+      final blockStartMs = blockIdx * samplesPerPacket * sampleIntervalMs;
+
+      // Transmitted HR (0 = not yet calculated by firmware).
+      if (hrAvg > 0) {
+        hrData.add(HrDataPoint(timestampMs: blockStartMs, bpm: hrAvg));
+      }
+
+      // Lead-off detection: bits 0 (LO+) and 1 (LO-).
+      final isLeadOff = (flags & 0x03) != 0;
+      if (isLeadOff && !inLeadOff) {
+        inLeadOff    = true;
+        leadOffStart = blockStartMs;
+      } else if (!isLeadOff && inLeadOff) {
+        inLeadOff = false;
+        leadOffIntervals.add(LeadOffInterval(startMs: leadOffStart, endMs: blockStartMs));
+      }
+
+      for (int i = 0; i < samplesPerPacket; i++) {
+        final value = bd.getUint16(offset + sampleOffset + i * 2, Endian.little);
+        final sampleIdx = blockIdx * samplesPerPacket + i;
+        samples.add(EcgSample(
+          value: value,
+          timestampMs: sampleIdx * sampleIntervalMs,
+        ));
+      }
+    }
+
+    // Close any lead-off interval still open at end of recording.
+    if (inLeadOff) {
+      leadOffIntervals.add(LeadOffInterval(startMs: leadOffStart, endMs: -1));
     }
 
     return ImportedSession(
@@ -90,6 +124,8 @@ class SdCardImportService {
       importedAt: DateTime.now(),
       samples: samples,
       skippedPackets: skippedBlocks + missingPackets,
+      hrData: hrData,
+      leadOffIntervals: leadOffIntervals,
     );
   }
 }

@@ -47,6 +47,15 @@ dependencies:
   # Native file picker dialog for importing SD card binary files
   file_picker: ^8.0.0
 
+  # Local SQLite database for persons and session metadata
+  sqflite: ^2.3.3
+
+  # Path joining for SQLite and file operations
+  path: ^1.9.0
+
+  # Keeps screen + CPU awake during 12-hour recordings
+  wakelock_plus: ^1.1.4
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -28,7 +28,10 @@ class EcgBleService {
   StreamSubscription<ConnectionStateUpdate>? _connectionSubscription;
   StreamSubscription<List<int>>? _notificationSubscription;
 
-  final StreamController<EcgPacket> _packetController = StreamController<EcgPacket>.broadcast();
+  final StreamController<EcgPacket> _packetController =
+      StreamController<EcgPacket>.broadcast();
+  final StreamController<bool> _connectionController =
+      StreamController<bool>.broadcast();
 
   String? _connectedDeviceId;
   final List<int> _incomingBuffer = [];
@@ -39,6 +42,9 @@ class EcgBleService {
 
   /// Stream of parsed ECG packets from the BLE device.
   Stream<EcgPacket> get ecgPackets => _packetController.stream;
+
+  /// Emits true on connect, false on disconnect.
+  Stream<bool> get connectionState => _connectionController.stream;
 
   /// Starts the BLE pipeline: scan for device, connect, synchronize timestamp,
   /// start ECG transmission, and subscribe to notifications.
@@ -96,6 +102,7 @@ class EcgBleService {
 
           if (connectionState.connectionState == DeviceConnectionState.connected && _connectedDeviceId == null) {
             _connectedDeviceId = deviceId;
+            _connectionController.add(true);
 
             try {
               // Request larger MTU to avoid packet fragmentation (47 bytes + headers)
@@ -128,6 +135,7 @@ class EcgBleService {
             }
           } else if (connectionState.connectionState == DeviceConnectionState.disconnected) {
             _connectedDeviceId = null;
+            _connectionController.add(false);
             print('Device disconnected');
             _packetController.addError('Device disconnected');
           }
@@ -215,9 +223,10 @@ class EcgBleService {
       deviceId: deviceId,
     );
 
-    // Send timestamp as 4-byte little-endian uint32_t
-    final timestampBytes = ByteData(4);
-    timestampBytes.setUint32(0, timestampMs, Endian.little);
+    // Send timestamp as 8-byte little-endian int64 (Unix epoch ms).
+    // uint32 would overflow for current Unix timestamps (~1.748 trillion ms).
+    final timestampBytes = ByteData(8);
+    timestampBytes.setInt64(0, timestampMs, Endian.little);
     final data = timestampBytes.buffer.asUint8List();
 
     try {

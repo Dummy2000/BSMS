@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git -C c:/dev/BSMS diff HEAD --stat)"
+      "Bash(git -C c:/dev/BSMS diff HEAD --stat)",
+      "Bash(flutter analyze *)"
     ]
   }
 }

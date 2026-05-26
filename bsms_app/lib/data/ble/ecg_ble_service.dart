@@ -160,6 +160,10 @@ class EcgBleService {
         deviceId: deviceId,
       );
 
+      // Always start with a clean buffer — stale bytes from a previous
+      // connection would misalign the packet framing permanently.
+      _incomingBuffer.clear();
+
       _notificationSubscription = _ble.subscribeToCharacteristic(characteristic).listen(
         (data) {
           try {
@@ -230,17 +234,16 @@ class EcgBleService {
     final data = timestampBytes.buffer.asUint8List();
 
     try {
-      // Try writing without response first (more common for ESP32)
-      await _ble.writeCharacteristicWithoutResponse(characteristic, value: data);
-      print('Timestamp sent to ESP32: $timestampMs ms (no response)');
+      // Write with response to guarantee the ESP32 onWrite callback fires.
+      await _ble.writeCharacteristicWithResponse(characteristic, value: data);
+      print('Timestamp sent to ESP32: $timestampMs ms (with response)');
     } catch (e) {
-      print('Failed to send timestamp without response: $e. Trying with response...');
+      print('Failed to send timestamp with response: $e. Trying without response...');
       try {
-        // Fallback to writing with response
-        await _ble.writeCharacteristicWithResponse(characteristic, value: data);
-        print('Timestamp sent to ESP32: $timestampMs ms (with response)');
+        await _ble.writeCharacteristicWithoutResponse(characteristic, value: data);
+        print('Timestamp sent to ESP32: $timestampMs ms (no response)');
       } catch (e2) {
-        print('Failed to send timestamp with response fallback: $e2');
+        print('Failed to send timestamp without response fallback: $e2');
         throw Exception('Failed to send timestamp to ESP32: $e2');
       }
     }

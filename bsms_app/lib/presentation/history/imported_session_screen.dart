@@ -34,6 +34,10 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
   int  _totalSamples   = 0;
 
   // ── Shared ────────────────────────────────────────────────────────────────
+  /// Timestamp (ms) of the very first sample, used to convert absolute
+  /// sample timestamps to recording-relative X-axis values.
+  /// 0 for file-backed (SessionReader already returns relative timestamps).
+  late final int _recordingOrigin;
   late final List<DetectedEvent> _events;
 
   /// Effective HR data: session.hrData for SD imports, peaks→bpm for BLE.
@@ -57,17 +61,19 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
     final session = widget.session;
 
     if (_isFileBacked) {
-      _filtered     = const [];
-      _rPeaks       = const [];
-      _totalSamples = session.totalSampleCount;
+      _filtered        = const [];
+      _rPeaks          = const [];
+      _totalSamples    = session.totalSampleCount;
+      _recordingOrigin = 0; // SessionReader returns timestamps relative to recording start
       _effectiveHrData =
           EventDetectionService.hrFromPeakIndices(session.rPeakIndices);
       _events =
           EventDetectionService.detectFromPeakIndices(session.rPeakIndices);
       _loadCacheAround(0);
     } else {
-      _totalSamples = 0;
-      _filtered     = EcgFilter.bandpass(session.samples);
+      _totalSamples    = 0;
+      _recordingOrigin = 0; // raw Unix epoch ms used directly as X values
+      _filtered        = EcgFilter.bandpass(session.samples);
       _rPeaks       = RPeakDetector.detect(_filtered);
 
       if (session.hrData.isNotEmpty) {
@@ -171,7 +177,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
         .toList();
   }
 
-  List<PlotBand> _leadOffBands(int originMs) {
+  List<PlotBand> _leadOffBands() {
     if (!_showLeadOff || widget.session.leadOffIntervals.isEmpty) return const [];
     final visible = _visibleSamples;
     if (visible.isEmpty) return const [];
@@ -191,8 +197,8 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
         .map((iv) {
           final end = iv.endMs == -1 ? recEnd : iv.endMs;
           return PlotBand(
-            start: (iv.startMs - originMs).toDouble(),
-            end:   (end        - originMs).toDouble(),
+            start: (iv.startMs - _recordingOrigin).toDouble(),
+            end:   (end        - _recordingOrigin).toDouble(),
             color: Colors.red.withAlpha(45),
             borderColor: Colors.red.withAlpha(80),
             borderWidth: 1,
@@ -201,7 +207,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
         .toList();
   }
 
-  List<PlotBand> _disconnectBands(int originMs) {
+  List<PlotBand> _disconnectBands() {
     if (!_showDisconnect || widget.session.disconnectIntervals.isEmpty) {
       return const [];
     }
@@ -218,14 +224,39 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
         .map((iv) {
           final end = iv.endMs == -1 ? winEnd : iv.endMs;
           return PlotBand(
-            start: (iv.startMs - originMs).toDouble(),
-            end:   (end        - originMs).toDouble(),
+            start: (iv.startMs - _recordingOrigin).toDouble(),
+            end:   (end        - _recordingOrigin).toDouble(),
             color: Colors.red.withAlpha(100),
             borderColor: Colors.red,
             borderWidth: 1.5,
           );
         })
         .toList();
+  }
+
+  static const int _utcOffsetMs = 2 * 3600 * 1000; // Vienna UTC+2 (CEST)
+
+  String _formatAsViennaTime(int ms) {
+    final dayMs = (ms + _utcOffsetMs) % 86400000;
+    final h = dayMs ~/ 3600000;
+    final m = ((dayMs % 3600000) ~/ 60000).toString().padLeft(2, '0');
+    final s = ((dayMs % 60000) ~/ 1000).toString().padLeft(2, '0');
+    return '$h:$m:$s';
+  }
+
+  String _formatWindowPosition() {
+    if (!_isFileBacked && widget.session.samples.isNotEmpty) {
+      final rawMs = widget.session.samples.first.timestampMs + _windowStart * 2;
+      return _formatAsViennaTime(rawMs);
+    }
+    return _msToTime(_windowStart * 2);
+  }
+
+  int get _axisIntervalMs {
+    final durationMs = _windowSize * 2;
+    if (durationMs <= 5000)  return 1000;
+    if (durationMs <= 10000) return 2000;
+    return 5000;
   }
 
   int get _maxStart {
@@ -268,7 +299,16 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
   }
 
   void _jumpToEvent(DetectedEvent event) {
-    final sampleIdx = event.timestampMs ~/ 2;
+    final int sampleIdx;
+    if (_isFileBacked) {
+      sampleIdx = event.timestampMs ~/ 2;
+    } else {
+      // event.timestampMs is a real Unix epoch ms; convert to sample index
+      final originMs = widget.session.samples.isNotEmpty
+          ? widget.session.samples.first.timestampMs
+          : 0;
+      sampleIdx = ((event.timestampMs - originMs) ~/ 2).clamp(0, _maxStart);
+    }
     _onWindowMoved((sampleIdx - _windowSize ~/ 2).clamp(0, _maxStart));
   }
 
@@ -276,15 +316,16 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final session    = widget.session;
-    final visible    = _visibleSamples;
-    final origin     = visible.isNotEmpty ? visible.first.timestampMs : 0;
-    final hasHr      = _effectiveHrData.isNotEmpty;
-    final hasLo      = session.leadOffIntervals.isNotEmpty;
-    final hasDc      = session.disconnectIntervals.isNotEmpty;
-    final plotBands  = [
-      ..._leadOffBands(origin),
-      ..._disconnectBands(origin),
+    final session   = widget.session;
+    final visible   = _visibleSamples;
+    // used only to filter HR points to the visible window
+    final hrOrigin  = visible.isNotEmpty ? visible.first.timestampMs : 0;
+    final hasHr     = _effectiveHrData.isNotEmpty;
+    final hasLo     = session.leadOffIntervals.isNotEmpty;
+    final hasDc     = session.disconnectIntervals.isNotEmpty;
+    final plotBands = [
+      ..._leadOffBands(),
+      ..._disconnectBands(),
     ];
 
     return Scaffold(
@@ -364,7 +405,24 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                         },
                         child: SfCartesianChart(
                           primaryXAxis: NumericAxis(
-                            title: AxisTitle(text: 'Zeit (ms)'),
+                            title: AxisTitle(text: 'Zeit'),
+                            interval: _axisIntervalMs.toDouble(),
+                            axisLabelFormatter: (AxisLabelRenderDetails d) {
+                              if (!_isFileBacked) {
+                                return ChartAxisLabel(
+                                  _formatAsViennaTime(d.value.toInt()),
+                                  d.textStyle,
+                                );
+                              }
+                              final dur = Duration(milliseconds: d.value.toInt());
+                              final h = dur.inHours;
+                              final m = dur.inMinutes.remainder(60).toString().padLeft(2, '0');
+                              final s = dur.inSeconds.remainder(60).toString().padLeft(2, '0');
+                              return ChartAxisLabel(
+                                h > 0 ? '$h:$m:$s' : '$m:$s',
+                                d.textStyle,
+                              );
+                            },
                             plotBands: plotBands,
                           ),
                           primaryYAxis:
@@ -384,7 +442,8 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                           series: <CartesianSeries>[
                             LineSeries<EcgSample, int>(
                               dataSource: visible,
-                              xValueMapper: (s, _) => s.timestampMs - origin,
+                              xValueMapper: (s, _) =>
+                                  s.timestampMs - _recordingOrigin,
                               yValueMapper: (s, _) => s.value,
                               animationDuration: 0,
                               width: 1.2,
@@ -396,7 +455,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                               ScatterSeries<EcgSample, int>(
                                 dataSource: _visibleRPeaks,
                                 xValueMapper: (s, _) =>
-                                    s.timestampMs - origin,
+                                    s.timestampMs - _recordingOrigin,
                                 yValueMapper: (s, _) => s.value,
                                 markerSettings: const MarkerSettings(
                                   isVisible: true,
@@ -409,9 +468,9 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                               ),
                             if (_showHr && hasHr)
                               LineSeries<HrDataPoint, int>(
-                                dataSource: _visibleHrPoints(origin),
+                                dataSource: _visibleHrPoints(hrOrigin),
                                 xValueMapper: (p, _) =>
-                                    p.timestampMs - origin,
+                                    p.timestampMs - _recordingOrigin,
                                 yValueMapper: (p, _) => p.bpm,
                                 yAxisName: 'hrAxis',
                                 animationDuration: 0,
@@ -499,7 +558,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
           if (_maxStart > 0) ...[
             const SizedBox(width: 4),
             Text(
-              _msToTime(_windowStart * 2),
+              _formatWindowPosition(),
               style: Theme.of(context).textTheme.bodySmall,
             ),
             Expanded(

@@ -34,6 +34,7 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
   int _packetsSinceUpdate = 0;
   bool _bleConnected = false;
   String _status = 'Nicht verbunden';
+  int _lastPacketHr = 0; // HR reported by ESP firmware, shown outside recording
 
   RecordingStatus? _recStatus;
   StreamSubscription<EcgPacket>? _packetSub;
@@ -47,6 +48,11 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
       setState(() {
         _bleConnected = connected;
         _status = connected ? 'Verbunden' : 'Verbindung getrennt';
+        if (!connected) {
+          // Clear stale samples so the chart starts clean on reconnect.
+          _liveBuffer.clear();
+          _lastPacketHr = 0;
+        }
       });
     });
     _packetSub = widget.bleService.ecgPackets.listen(_onPacket, onError: (_) {});
@@ -64,6 +70,8 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
   }
 
   void _onPacket(EcgPacket packet) {
+    if (packet.heartRate > 0) _lastPacketHr = packet.heartRate;
+
     final base = packet.timestamp.millisecondsSinceEpoch;
     for (int i = 0; i < packet.samples.length; i++) {
       _liveBuffer.add(EcgSample(
@@ -143,7 +151,6 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
   Widget build(BuildContext context) {
     final isRecording = widget.recordingService.isRecording;
     final visible = List<EcgSample>.from(_liveBuffer);
-    final origin  = visible.isNotEmpty ? visible.first.timestampMs : 0;
 
     return Scaffold(
       appBar: AppBar(
@@ -170,6 +177,7 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
             status: _status,
             connected: _bleConnected,
             recStatus: _recStatus,
+            liveHr: _lastPacketHr,
             formatElapsed: _formatElapsed,
           ),
 
@@ -187,12 +195,22 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
                       ),
                     )
                   : SfCartesianChart(
-                      primaryXAxis: NumericAxis(isVisible: false),
+                      primaryXAxis: NumericAxis(
+                        interval: 1000,
+                        axisLabelFormatter: (AxisLabelRenderDetails d) {
+                          const utcOffsetMs = 2 * 3600 * 1000; // Vienna UTC+2
+                          final dayMs = (d.value.toInt() + utcOffsetMs) % 86400000;
+                          final h = dayMs ~/ 3600000;
+                          final m = ((dayMs % 3600000) ~/ 60000).toString().padLeft(2, '0');
+                          final s = ((dayMs % 60000) ~/ 1000).toString().padLeft(2, '0');
+                          return ChartAxisLabel('$h:$m:$s', d.textStyle);
+                        },
+                      ),
                       primaryYAxis: NumericAxis(title: AxisTitle(text: 'ADC')),
                       series: <CartesianSeries>[
                         LineSeries<EcgSample, int>(
                           dataSource: visible,
-                          xValueMapper: (s, _) => s.timestampMs - origin,
+                          xValueMapper: (s, _) => s.timestampMs,
                           yValueMapper: (s, _) => s.value,
                           animationDuration: 0,
                           width: 1.2,
@@ -242,17 +260,22 @@ class _StatusBar extends StatelessWidget {
   final String status;
   final bool connected;
   final RecordingStatus? recStatus;
+  final int liveHr;
   final String Function(Duration) formatElapsed;
 
   const _StatusBar({
     required this.status,
     required this.connected,
     required this.recStatus,
+    required this.liveHr,
     required this.formatElapsed,
   });
 
   @override
   Widget build(BuildContext context) {
+    final isRecording = recStatus != null;
+    final hrToShow = isRecording ? recStatus!.currentHr : liveHr;
+
     return Container(
       color: Theme.of(context).colorScheme.surfaceContainerHighest,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -265,15 +288,20 @@ class _StatusBar extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           Expanded(child: Text(status, style: const TextStyle(fontSize: 13))),
-          if (recStatus != null) ...[
-            Icon(Icons.circle, size: 10, color: Colors.red),
+          if (isRecording) ...[
+            const Icon(Icons.circle, size: 10, color: Colors.red),
             const SizedBox(width: 4),
             Text(
-              '${formatElapsed(recStatus!.elapsed)}'
-              '  ${recStatus!.currentHr > 0 ? "${recStatus!.currentHr} bpm" : ""}',
+              formatElapsed(recStatus!.elapsed),
               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
             ),
+            const SizedBox(width: 8),
           ],
+          if (hrToShow > 0)
+            Text(
+              '$hrToShow bpm',
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
         ],
       ),
     );

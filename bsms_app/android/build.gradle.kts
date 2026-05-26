@@ -20,14 +20,16 @@ subprojects {
     val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 
-    plugins.withId("com.android.library") {
-        extensions.configure<LibraryExtension>("android") {
-            compileSdkVersion(androidCompileSdk)
+    afterEvaluate {
+        if (project.plugins.hasPlugin("com.android.library")) {
+            project.extensions.configure<LibraryExtension>("android") {
+                compileSdkVersion(androidCompileSdk)
+            }
         }
-    }
-    plugins.withId("com.android.application") {
-        extensions.configure<AppExtension>("android") {
-            compileSdkVersion(androidCompileSdk)
+        if (project.plugins.hasPlugin("com.android.application")) {
+            project.extensions.configure<AppExtension>("android") {
+                compileSdkVersion(androidCompileSdk)
+            }
         }
     }
 }

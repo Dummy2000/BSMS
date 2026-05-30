@@ -3,6 +3,7 @@ import '../../data/import/sd_card_import_service.dart';
 import '../../data/storage/imported_session_repository.dart';
 import '../../data/storage/session_storage_service.dart';
 import '../../domain/models/imported_session.dart';
+import '../../l10n/l10n_ext.dart';
 import 'imported_session_screen.dart';
 
 class HistoryScreen extends StatefulWidget {
@@ -32,6 +33,9 @@ class _HistoryScreenState extends State<HistoryScreen>
   void initState() {
     super.initState();
     _tabs = TabController(length: 2, vsync: this);
+    _tabs.addListener(() {
+      if (!_tabs.indexIsChanging) setState(() {});
+    });
     _loadBleRecordings();
   }
 
@@ -60,17 +64,15 @@ class _HistoryScreenState extends State<HistoryScreen>
       if (!mounted) return;
       if (session.skippedPackets > 0) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-            'Importiert: ${session.samples.length} Samples'
-            ' (${session.skippedPackets} fehlerhafte Pakete übersprungen)',
-          ),
+          content: Text(context.l10n.importedSummary(
+              session.samples.length, session.skippedPackets)),
         ));
       }
       setState(() {});
-    } on FormatException catch (e) {
+    } on FormatException catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(e.message),
+          content: Text(context.l10n.importError),
           backgroundColor: Theme.of(context).colorScheme.error,
         ));
       }
@@ -88,14 +90,15 @@ class _HistoryScreenState extends State<HistoryScreen>
   Widget build(BuildContext context) {
     final sdSessions  = widget.sdRepository.getAll();
 
+    final l = context.l10n;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Aufnahmen'),
+        title: Text(l.historyTitle),
         bottom: TabBar(
           controller: _tabs,
-          tabs: const [
-            Tab(icon: Icon(Icons.sd_card), text: 'SD-Import'),
-            Tab(icon: Icon(Icons.bluetooth), text: 'BLE-Aufnahmen'),
+          tabs: [
+            Tab(icon: const Icon(Icons.sd_card), text: l.tabSdImport),
+            Tab(icon: const Icon(Icons.bluetooth), text: l.tabBleRecordings),
           ],
         ),
       ),
@@ -104,9 +107,9 @@ class _HistoryScreenState extends State<HistoryScreen>
         children: [
           // ── Tab 0: SD imports ──────────────────────────────────────────
           sdSessions.isEmpty
-              ? const Center(
+              ? Center(
                   child: Text(
-                    'Noch keine SD-Importe.\nTippe auf + um eine Datei zu laden.',
+                    l.sdEmpty,
                     textAlign: TextAlign.center,
                   ),
                 )
@@ -126,26 +129,37 @@ class _HistoryScreenState extends State<HistoryScreen>
                 ),
 
           // ── Tab 1: BLE recordings ──────────────────────────────────────
-          _loadingBle
-              ? const Center(child: CircularProgressIndicator())
-              : _bleRecordings.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'Noch keine BLE-Aufnahmen.\nStarte eine Aufnahme im Live-Tab.',
-                        textAlign: TextAlign.center,
+          RefreshIndicator(
+            onRefresh: _loadBleRecordings,
+            child: _loadingBle
+                ? const Center(child: CircularProgressIndicator())
+                : _bleRecordings.isEmpty
+                    ? ListView(
+                        // Always scrollable so pull-to-refresh works on empty state.
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        children: [
+                          const SizedBox(height: 200),
+                          Center(
+                            child: Text(
+                              l.bleEmpty,
+                              textAlign: TextAlign.center,
+                            ),
+                          ),
+                        ],
+                      )
+                    : ListView.builder(
+                        physics: const AlwaysScrollableScrollPhysics(),
+                        itemCount: _bleRecordings.length,
+                        itemBuilder: (_, i) {
+                          final s = _bleRecordings[i];
+                          return _SessionTile(
+                            session: s,
+                            onTap: () => _push(s),
+                            onDelete: () => _deleteBle(s),
+                          );
+                        },
                       ),
-                    )
-                  : ListView.builder(
-                      itemCount: _bleRecordings.length,
-                      itemBuilder: (_, i) {
-                        final s = _bleRecordings[i];
-                        return _SessionTile(
-                          session: s,
-                          onTap: () => _push(s),
-                          onDelete: () => _deleteBle(s),
-                        );
-                      },
-                    ),
+          ),
         ],
       ),
       floatingActionButton: _tabs.index == 0
@@ -157,7 +171,7 @@ class _HistoryScreenState extends State<HistoryScreen>
                       height: 20,
                       child: CircularProgressIndicator(strokeWidth: 2))
                   : const Icon(Icons.upload_file),
-              label: const Text('Datei importieren'),
+              label: Text(l.importFile),
             )
           : null,
     );
@@ -202,7 +216,7 @@ class _SessionTile extends StatelessWidget {
       ),
       title: Text(session.sourceFile),
       subtitle: Text(
-        '${_fmtDuration(session.duration)} · ${session.sampleCount} Samples'
+        '${context.l10n.sessionSubtitle(_fmtDuration(session.duration), session.sampleCount)}'
         '\n${_fmtDate(session.importedAt)}',
       ),
       isThreeLine: true,
@@ -210,7 +224,7 @@ class _SessionTile extends StatelessWidget {
       trailing: IconButton(
         icon: const Icon(Icons.delete_outline),
         onPressed: onDelete,
-        tooltip: 'Entfernen',
+        tooltip: context.l10n.removeTooltip,
       ),
     );
   }

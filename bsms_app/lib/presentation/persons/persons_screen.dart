@@ -4,6 +4,7 @@ import '../../data/storage/session_storage_service.dart';
 import '../../domain/models/person.dart';
 import '../../domain/models/imported_session.dart';
 import '../history/imported_session_screen.dart';
+import '../../l10n/l10n_ext.dart';
 import 'person_form.dart';
 
 class PersonsScreen extends StatefulWidget {
@@ -49,16 +50,17 @@ class _PersonsScreenState extends State<PersonsScreen> {
   }
 
   Future<void> _delete(Person person) async {
+    final l = context.l10n;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Person löschen?'),
-        content: Text('${person.name} und alle zugehörigen Daten werden entfernt.'),
+        title: Text(l.personDeleteTitle),
+        content: Text(l.personDeleteBody(person.name)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Abbrechen')),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(l.cancel)),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Löschen', style: TextStyle(color: Colors.red)),
+            child: Text(l.delete, style: const TextStyle(color: Colors.red)),
           ),
         ],
       ),
@@ -74,13 +76,13 @@ class _PersonsScreenState extends State<PersonsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Personen')),
+      appBar: AppBar(title: Text(context.l10n.personsTitle)),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _persons.isEmpty
-              ? const Center(
+              ? Center(
                   child: Text(
-                    'Noch keine Personen angelegt.\nTippe auf + um eine neue Person zu erstellen.',
+                    context.l10n.personsEmpty,
                     textAlign: TextAlign.center,
                   ),
                 )
@@ -95,7 +97,7 @@ class _PersonsScreenState extends State<PersonsScreen> {
                 ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => _openForm(),
-        tooltip: 'Neue Person',
+        tooltip: context.l10n.newPerson,
         child: const Icon(Icons.person_add),
       ),
     );
@@ -151,8 +153,8 @@ class _PersonTileState extends State<_PersonTile> {
             leading: CircleAvatar(child: Text(widget.person.name[0].toUpperCase())),
             title: Text(widget.person.name,
                 style: const TextStyle(fontWeight: FontWeight.w600)),
-            subtitle: Text('${widget.person.age} Jahre'
-                '${widget.person.notes.isNotEmpty ? ' · ${widget.person.notes}' : ''}'),
+            subtitle: Text(context.l10n.personAge(widget.person.age) +
+                (widget.person.notes.isNotEmpty ? ' · ${widget.person.notes}' : '')),
             trailing: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -180,9 +182,10 @@ class _PersonTileState extends State<_PersonTile> {
                 child: CircularProgressIndicator(),
               )
             else if (_sessions!.isEmpty)
-              const Padding(
-                padding: EdgeInsets.all(12),
-                child: Text('Noch keine Aufnahmen.', style: TextStyle(fontSize: 13)),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(context.l10n.noRecordings,
+                    style: const TextStyle(fontSize: 13)),
               )
             else
               ...(_sessions!.map((session) => ListTile(

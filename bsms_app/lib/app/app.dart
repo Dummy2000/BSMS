@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import '../l10n/app_localizations.dart';
+import '../l10n/l10n_ext.dart';
 import '../data/ble/ecg_ble_service.dart';
 import '../data/ble/ecg_packet_parser.dart';
 import '../data/ble/ble_recording_service.dart';
@@ -8,6 +11,7 @@ import '../data/storage/person_repository.dart';
 import '../data/storage/session_storage_service.dart';
 import '../presentation/history/history_screen.dart';
 import '../presentation/live_ecg/live_ecg_screen.dart';
+import '../presentation/permissions/permission_gate.dart';
 import '../presentation/persons/persons_screen.dart';
 
 class BsmsApp extends StatelessWidget {
@@ -40,7 +44,25 @@ class BsmsApp extends StatelessWidget {
         ),
       ),
       themeMode: ThemeMode.system,
-      home: const _BsmsHome(),
+      localizationsDelegates: const [
+        AppLocalizations.delegate,
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: AppLocalizations.supportedLocales,
+      // Follow the phone language; fall back to English for any unlisted locale.
+      localeListResolutionCallback: (deviceLocales, supported) {
+        if (deviceLocales != null) {
+          for (final device in deviceLocales) {
+            for (final s in supported) {
+              if (s.languageCode == device.languageCode) return s;
+            }
+          }
+        }
+        return const Locale('en');
+      },
+      home: const PermissionGate(child: _BsmsHome()),
     );
   }
 }
@@ -106,21 +128,21 @@ class _BsmsHomeState extends State<_BsmsHome> {
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
         onDestinationSelected: (i) => setState(() => _currentIndex = i),
-        destinations: const [
+        destinations: [
           NavigationDestination(
-            icon: Icon(Icons.monitor_heart_outlined),
-            selectedIcon: Icon(Icons.monitor_heart),
-            label: 'Live EKG',
+            icon: const Icon(Icons.monitor_heart_outlined),
+            selectedIcon: const Icon(Icons.monitor_heart),
+            label: context.l10n.navLive,
           ),
           NavigationDestination(
-            icon: Icon(Icons.history_outlined),
-            selectedIcon: Icon(Icons.history),
-            label: 'Verlauf',
+            icon: const Icon(Icons.history_outlined),
+            selectedIcon: const Icon(Icons.history),
+            label: context.l10n.navHistory,
           ),
           NavigationDestination(
-            icon: Icon(Icons.people_outline),
-            selectedIcon: Icon(Icons.people),
-            label: 'Personen',
+            icon: const Icon(Icons.people_outline),
+            selectedIcon: const Icon(Icons.people),
+            label: context.l10n.navPersons,
           ),
         ],
       ),

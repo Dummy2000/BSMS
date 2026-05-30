@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../../domain/models/person.dart';
 import '../../data/storage/person_repository.dart';
+import '../../l10n/l10n_ext.dart';
 
 class PersonFormScreen extends StatefulWidget {
   final PersonRepository repository;
@@ -59,8 +60,9 @@ class _PersonFormScreenState extends State<PersonFormScreen> {
   @override
   Widget build(BuildContext context) {
     final isNew = widget.existing == null;
+    final l = context.l10n;
     return Scaffold(
-      appBar: AppBar(title: Text(isNew ? 'Neue Person' : 'Person bearbeiten')),
+      appBar: AppBar(title: Text(isNew ? l.newPerson : l.editPerson)),
       body: Form(
         key: _formKey,
         child: ListView(
@@ -68,37 +70,37 @@ class _PersonFormScreenState extends State<PersonFormScreen> {
           children: [
             TextFormField(
               controller: _nameCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Name *',
-                border: OutlineInputBorder(),
+              decoration: InputDecoration(
+                labelText: l.fieldName,
+                border: const OutlineInputBorder(),
               ),
               textCapitalization: TextCapitalization.words,
               validator: (v) =>
-                  (v == null || v.trim().isEmpty) ? 'Name erforderlich' : null,
+                  (v == null || v.trim().isEmpty) ? l.nameRequired : null,
             ),
             const SizedBox(height: 16),
             TextFormField(
               controller: _ageCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Alter *',
-                border: OutlineInputBorder(),
-                suffixText: 'Jahre',
+              decoration: InputDecoration(
+                labelText: l.fieldAge,
+                border: const OutlineInputBorder(),
+                suffixText: l.yearsSuffix,
               ),
               keyboardType: TextInputType.number,
               inputFormatters: [FilteringTextInputFormatter.digitsOnly],
               validator: (v) {
                 final n = int.tryParse(v ?? '');
-                if (n == null || n < 1 || n > 120) return 'Gültiges Alter eingeben';
+                if (n == null || n < 1 || n > 120) return l.validAge;
                 return null;
               },
             ),
             const SizedBox(height: 16),
             TextFormField(
               controller: _notesCtrl,
-              decoration: const InputDecoration(
-                labelText: 'Notizen (optional)',
-                border: OutlineInputBorder(),
-                hintText: 'z.B. Diagnose, Medikamente …',
+              decoration: InputDecoration(
+                labelText: l.fieldNotes,
+                border: const OutlineInputBorder(),
+                hintText: l.notesHint,
               ),
               maxLines: 4,
             ),
@@ -110,7 +112,7 @@ class _PersonFormScreenState extends State<PersonFormScreen> {
                       width: 20,
                       height: 20,
                       child: CircularProgressIndicator(strokeWidth: 2))
-                  : Text(isNew ? 'Erstellen' : 'Speichern'),
+                  : Text(isNew ? l.create : l.save),
             ),
           ],
         ),

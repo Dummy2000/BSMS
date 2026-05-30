@@ -146,61 +146,148 @@ float    candidatePeak = 0;
 unsigned long candidateTime = 0;
 bool     trackingPeak = false;
 
+// Searchback buffer: 800 samples = 1.6 s at 500 Hz (3.2 KB)
+constexpr uint16_t SB_SIZE = 800;
+float    sbBuf[SB_SIZE]  = {0};
+uint16_t sbHead           = 0;   // next-write position
+uint32_t samplesSinceBeat = 0;   // samples since last confirmed beat
+float    meanRrMs         = 0;   // exp-avg RR interval in ms
+float    lastBeatMwi      = 0;   // MWI of last confirmed beat (T-wave check)
+
+// Confirm a beat: update thresholds, HR, and searchback state.
+static void confirmBeat(unsigned long beatTime, float mwiVal, bool fromSearchback = false) {
+  // SPKI update: half weight for searchback peaks; cap at ×1.5 (normal) / ×1.3
+  // (searchback) to prevent a single noise spike from inflating the threshold
+  // so high that real R-peaks are missed for tens of seconds (Biomed Eng Online).
+  float weight  = fromSearchback ? 0.0625f : 0.125f;
+  float rawSpki = weight * mwiVal + (1.0f - weight) * SPKI;
+  float maxSpki = fromSearchback ? SPKI * 1.3f : SPKI * 1.5f;
+  SPKI = (rawSpki < maxSpki) ? rawSpki : maxSpki;
+  if (lastBeatTimeForRR > 0) {
+    unsigned long rr = beatTime - lastBeatTimeForRR;
+    // Only use RR ≥ 250 ms (< 240 BPM). Shorter RRs are searchback/tracking
+    // artefacts and would lock hrSmoothed at 220 via the EMA.
+    if (rr >= 250) {
+      meanRrMs = (meanRrMs == 0) ? (float)rr : 0.125f * rr + 0.875f * meanRrMs;
+      uint16_t hrInst = (uint16_t)(60000UL / rr);
+      if (hrInst >= 30 && hrInst <= 200) {
+        // Pure EMA — no hard rejection window. Recovers from a bad estimate
+        // within ~10 beats instead of getting permanently stuck.
+        hrSmoothed = (hrSmoothed == 0) ? hrInst : 0.2f * hrInst + 0.8f * hrSmoothed;
+        currentHR  = (uint8_t)hrSmoothed;
+      }
+    }
+  }
+  // Don't overwrite the T-wave reference with a searchback peak — it may be
+  // a noise artefact and would cause genuine R-peaks to be rejected as T-waves.
+  if (!fromSearchback) lastBeatMwi = mwiVal;
+  lastBeatTimeForRR = beatTime;
+  lastPeakTime      = beatTime;
+  samplesSinceBeat  = 0;
+}
+
 void detectPeakPT(float mwiValue, unsigned long now_ms) {
   static unsigned long initStartTime = 0;
   static float initMaxMwi = 0;
-  static float initSumMwi = 0;
   static uint32_t initCount = 0;
   static bool initialized = false;
 
+  // ── Write MWI into searchback buffer ─────────────────────────────────────
+  sbBuf[sbHead] = mwiValue;
+  sbHead = (sbHead + 1) % SB_SIZE;
+  samplesSinceBeat++;
+
+  // ── 2-second initialisation ───────────────────────────────────────────────
   if (!initialized) {
     if (initStartTime == 0) initStartTime = now_ms;
     if (mwiValue > initMaxMwi) initMaxMwi = mwiValue;
-    initSumMwi += mwiValue;
     initCount++;
     if (now_ms - initStartTime >= 2000) {
-      float meanMwi = initSumMwi / initCount;
-      SPKI = initMaxMwi / 3.0f;
-      NPKI = meanMwi / 2.0f;
+      SPKI = initMaxMwi * 0.5f;   // 50 % of max → conservative signal estimate
+      NPKI = initMaxMwi * 0.05f;  // 5 % of max → initial noise floor
       initialized = true;
       Serial.printf("PT init: SPKI=%.0f NPKI=%.0f\n", SPKI, NPKI);
     }
     return;
   }
 
+  // ── Active threshold decay ─────────────────────────────────────────────────
+  // If no beat for > 1.5 × meanRR, decay BOTH thresholds at 5.75 %/s (PLOS ONE
+  // 2016). Decaying SPKI alone is not enough: a noise burst can inflate NPKI
+  // (via T-wave/refractory/sub-threshold updates) so that the threshold
+  // 0.75·NPKI + 0.25·SPKI stays locked high — only restart would clear it.
+  // Decaying both brings the whole threshold down so the signal is reacquired;
+  // both recover automatically once beats resume.
+  // decayGap in samples: meanRrMs/2 (2 ms/sample) × 1.5 = meanRrMs × 0.75.
+  float decayGapSamples = (meanRrMs > 0) ? meanRrMs * 0.75f : 700.0f;
+  if (samplesSinceBeat > decayGapSamples) {
+    SPKI *= 0.99988f;  // ≈ 5.75 %/s at 500 Hz
+    NPKI *= 0.99988f;
+  }
+
+  // ── HR timeout ─────────────────────────────────────────────────────────────
+  // No beat for > 3 s (HR < 20 → implausible): clear HR so the app shows
+  // "no value" instead of freezing on a stale reading. lastBeatTimeForRR is
+  // zeroed to force a clean re-acquisition when the signal returns.
+  if (lastBeatTimeForRR > 0 && (now_ms - lastBeatTimeForRR) > 3000) {
+    currentHR         = 0;
+    hrSmoothed        = 0;
+    lastBeatTimeForRR = 0;
+  }
+
   float threshold = NPKI + 0.25f * (SPKI - NPKI);
 
+  // ── Searchback ────────────────────────────────────────────────────────────
+  // If no beat for > 1.66 × meanRR, scan the buffer at 50 % threshold.
+  float expectedGapMs = (meanRrMs > 0) ? meanRrMs * 1.66f : 1500.0f;
+  if (lastBeatTimeForRR > 0 && (float)(now_ms - lastBeatTimeForRR) > expectedGapMs) {
+    float halfThr = threshold * 0.5f;
+    // Search from 200 ms after last beat up to samplesSinceBeat samples back.
+    uint32_t searchEnd = (samplesSinceBeat < SB_SIZE) ? samplesSinceBeat : SB_SIZE;
+    float maxVal = 0;
+    uint16_t bestK = 0;
+    bool found = false;
+    for (uint32_t k = 100; k < searchEnd; k++) {  // k=100 → 200 ms refractory
+      uint16_t pos = (sbHead + SB_SIZE - 1 - k) % SB_SIZE;
+      if (sbBuf[pos] > maxVal) { maxVal = sbBuf[pos]; bestK = (uint16_t)k; found = true; }
+    }
+    if (found && maxVal > halfThr) {
+      unsigned long beatTime = now_ms - (unsigned long)bestK * 2UL; // 2 ms/sample
+      confirmBeat(beatTime, maxVal, true); // fromSearchback = true
+      samplesSinceBeat = bestK; // samples elapsed since found beat
+      // Discard any in-progress tracking so the current elevated MWI
+      // (tail of the just-found QRS) is not counted as a second beat.
+      trackingPeak  = false;
+      candidatePeak = 0;
+    }
+    // Re-read threshold (SPKI may have changed).
+    threshold = NPKI + 0.25f * (SPKI - NPKI);
+  }
+
+  // ── Normal peak tracking ──────────────────────────────────────────────────
   if (mwiValue > threshold) {
     if (!trackingPeak || mwiValue > candidatePeak) {
       candidatePeak = mwiValue;
       candidateTime = now_ms;
     }
     trackingPeak = true;
-  } else {
-    if (trackingPeak) {
-      bool refractoryOk = (candidateTime - lastPeakTime > REFRACTORY_MS);
-      if (refractoryOk) {
-        SPKI = 0.125f * candidatePeak + 0.875f * SPKI;
-        if (lastBeatTimeForRR > 0) {
-          unsigned long rr = candidateTime - lastBeatTimeForRR;
-          uint16_t hrInstant = 60000 / rr;
-          if (hrInstant >= 30 && hrInstant <= 220) {
-            if (hrSmoothed == 0) {
-              hrSmoothed = hrInstant;
-            } else if (abs((int)hrInstant - (int)hrSmoothed) <= 30) {
-              hrSmoothed = 0.2f * hrInstant + 0.8f * hrSmoothed;
-            }
-            currentHR = (uint8_t)hrSmoothed;
-          }
-        }
-        lastBeatTimeForRR = candidateTime;
-        lastPeakTime = candidateTime;
-      } else {
+  } else if (trackingPeak) {
+    trackingPeak = false;
+    bool refractoryOk = (candidateTime - lastPeakTime >= REFRACTORY_MS);
+    if (refractoryOk) {
+      // T-wave discrimination: within 360 ms of last beat AND < 50 % amplitude.
+      bool isTWave = (lastBeatTimeForRR > 0) &&
+                     (candidateTime - lastBeatTimeForRR < 360) &&
+                     (candidatePeak < 0.5f * lastBeatMwi);
+      if (isTWave) {
         NPKI = 0.125f * candidatePeak + 0.875f * NPKI;
+      } else {
+        confirmBeat(candidateTime, candidatePeak);
       }
-      trackingPeak = false;
-      candidatePeak = 0;
+    } else {
+      NPKI = 0.125f * candidatePeak + 0.875f * NPKI;
     }
+    candidatePeak = 0;
   }
 }
 
@@ -366,7 +453,7 @@ void setup() {
   Serial.printf("Baseline: %d\n", baseline);
 
   // ----- SD-Karte -----
-  //setupSD();
+  setupSD();
 
   // ----- BLE-Init -----
   BLEDevice::init("EKG-Holter");

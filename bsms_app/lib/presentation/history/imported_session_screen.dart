@@ -8,6 +8,9 @@ import '../../domain/models/imported_session.dart';
 import '../../domain/processing/ecg_filter.dart';
 import '../../domain/processing/r_peak_detector.dart';
 import '../../domain/processing/event_detection_service.dart';
+import '../../domain/processing/hrv_calculator.dart';
+import '../../l10n/app_localizations.dart';
+import '../../l10n/l10n_ext.dart';
 
 class ImportedSessionScreen extends StatefulWidget {
   final ImportedSession session;
@@ -43,13 +46,21 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
   /// Effective HR data: session.hrData for SD imports, peaks→bpm for BLE.
   late final List<HrDataPoint> _effectiveHrData;
 
+  /// SDNN (ms) over the whole recording, or null if too few NN intervals.
+  late final double? _sdnn;
+
+  /// User-selectable RMSSD: duration of the window and the last computed value.
+  int     _rmssdDurationMs = 90000; // default 90 s, changeable in the menu
+  double? _rmssdValue;              // last RMSSD created via the menu (null = none)
+
   int  _windowStart     = 0;
   int  _windowSize      = _defaultWindowSize;
+  int  _selectedEvent   = 0; // index into _events for the navigator bar
   bool _showFiltered    = true;
   bool _showHr          = true;
   bool _showLeadOff     = true;
   bool _showDisconnect  = true;
-  bool _showRPeaks      = true;
+  bool _showRPeaks      = false;
 
   bool get _isFileBacked => widget.session.isFileBacked;
 
@@ -67,15 +78,23 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
       _recordingOrigin = 0; // SessionReader returns timestamps relative to recording start
       _effectiveHrData =
           EventDetectionService.hrFromPeakIndices(session.rPeakIndices);
-      _events =
-          EventDetectionService.detectFromPeakIndices(session.rPeakIndices);
+      _events = EventDetectionService.applyLeadOff(
+        EventDetectionService.detectFromPeakIndices(session.rPeakIndices),
+        session.leadOffIntervals,
+        session.totalSampleCount * 2,
+      );
       _loadCacheAround(0);
+      _sdnn = HrvCalculator.sdnn(
+          session.rPeakIndices.map((i) => i * 2).toList());
     } else {
       _totalSamples    = 0;
       _recordingOrigin = 0; // raw Unix epoch ms used directly as X values
       _filtered        = EcgFilter.bandpass(session.samples);
       _rPeaks       = RPeakDetector.detect(_filtered);
 
+      final int recEndMs = session.samples.isNotEmpty
+          ? session.samples.last.timestampMs
+          : 0;
       if (session.hrData.isNotEmpty) {
         _effectiveHrData = session.hrData;
         final hrEvents = EventDetectionService.detectFromHrData(session.hrData);
@@ -83,12 +102,20 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
             .detect(session.samples, _rPeaks)
             .where((e) => e.type == EcgEventType.pause)
             .toList();
-        _events = [...hrEvents, ...pauses]
+        final merged = [...hrEvents, ...pauses]
           ..sort((a, b) => a.timestampMs.compareTo(b.timestampMs));
+        _events = EventDetectionService.applyLeadOff(
+            merged, session.leadOffIntervals, recEndMs);
       } else {
         _effectiveHrData = const [];
-        _events = EventDetectionService.detect(session.samples, _rPeaks);
+        _events = EventDetectionService.applyLeadOff(
+          EventDetectionService.detect(session.samples, _rPeaks),
+          session.leadOffIntervals,
+          recEndMs,
+        );
       }
+      _sdnn = HrvCalculator.sdnn(
+          _rPeaks.map((i) => session.samples[i].timestampMs).toList());
     }
   }
 
@@ -149,14 +176,17 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
     if (_isFileBacked) {
       if (_filteredCache.isEmpty) return const [];
       final cacheEnd = _cacheStart + _filteredCache.length;
-      return widget.session.rPeakIndices
-          .where((idx) =>
-              idx >= _windowStart &&
-              idx < _windowStart + _windowSize &&
-              idx >= _cacheStart &&
-              idx < cacheEnd)
-          .map((idx) => _filteredCache[idx - _cacheStart])
-          .toList();
+      const minGap = 100; // 200 ms refractory — skip artefact double-peaks
+      final result = <EcgSample>[];
+      int lastIdx = -minGap;
+      for (final idx in widget.session.rPeakIndices) {
+        if (idx < _windowStart || idx >= _windowStart + _windowSize) continue;
+        if (idx < _cacheStart  || idx >= cacheEnd) continue;
+        if (idx - lastIdx < minGap) continue; // too close → artefact
+        result.add(_filteredCache[idx - _cacheStart]);
+        lastIdx = idx;
+      }
+      return result;
     }
     final source = _showFiltered ? _filtered : widget.session.samples;
     final end    = (_windowStart + _windowSize).clamp(0, source.length);
@@ -245,11 +275,56 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
   }
 
   String _formatWindowPosition() {
-    if (!_isFileBacked && widget.session.samples.isNotEmpty) {
+    if (_isFileBacked) {
+      return _formatAsViennaTime(
+          _windowStart * 2 + widget.session.firstSampleTimestampMs);
+    }
+    if (widget.session.samples.isNotEmpty) {
       final rawMs = widget.session.samples.first.timestampMs + _windowStart * 2;
       return _formatAsViennaTime(rawMs);
     }
     return _msToTime(_windowStart * 2);
+  }
+
+  /// Formats an event timestamp (recording-relative for file-backed, absolute
+  /// sample ms for in-memory) as real Vienna wall-clock time.
+  String _eventTimeFmt(int ms) => _formatAsViennaTime(
+      ms + (_isFileBacked ? widget.session.firstSampleTimestampMs : 0));
+
+  List<PlotBand> _episodeBands() {
+    if (_events.isEmpty) return const [];
+    final visible = _visibleSamples;
+    if (visible.isEmpty) return const [];
+    final winStart = visible.first.timestampMs;
+    final winEnd   = visible.last.timestampMs;
+
+    final bands = <PlotBand>[];
+    for (final e in _events) {
+      if (e.type != EcgEventType.tachycardia &&
+          e.type != EcgEventType.bradycardia) {
+        continue;
+      }
+
+      final start = e.timestampMs - _recordingOrigin;
+      // Use actual episode duration; fall back to 1 s for onset-only events.
+      final end = (e.durationMs != null && e.durationMs! > 0)
+          ? start + e.durationMs!
+          : start + 1000;
+
+      if (end < winStart - _recordingOrigin || start > winEnd - _recordingOrigin) {
+        continue;
+      }
+
+      final isTachy = e.type == EcgEventType.tachycardia;
+      bands.add(PlotBand(
+        start: start.toDouble(),
+        end:   end.toDouble(),
+        color:       (isTachy ? Colors.orange : Colors.blue).withAlpha(35),
+        borderColor: (isTachy ? Colors.orange : Colors.blue).withAlpha(100),
+        borderWidth: 1,
+      ));
+    }
+    return bands;
   }
 
   int get _axisIntervalMs {
@@ -312,10 +387,89 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
     _onWindowMoved((sampleIdx - _windowSize ~/ 2).clamp(0, _maxStart));
   }
 
+  // ── Event navigation ────────────────────────────────────────────────────────
+
+  void _selectEvent(int index) {
+    if (_events.isEmpty) return;
+    final i = index.clamp(0, _events.length - 1);
+    setState(() => _selectedEvent = i);
+    _jumpToEvent(_events[i]);
+  }
+
+  Future<void> _openEventMenu() async {
+    if (_events.isEmpty) return;
+    final picked = await showModalBottomSheet<int>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => _EventMenuSheet(
+        events: _events,
+        selectedIndex: _selectedEvent,
+        timeFmt: _eventTimeFmt,
+      ),
+    );
+    if (picked != null) _selectEvent(picked);
+  }
+
+  // ── RMSSD (user-selectable window) ──────────────────────────────────────────
+
+  /// All R-peak timestamps as ms elapsed from the start of the recording.
+  List<int> _peaksElapsedMs() {
+    if (_isFileBacked) {
+      return widget.session.rPeakIndices.map((i) => i * 2).toList();
+    }
+    if (widget.session.samples.isEmpty) return const [];
+    final base = widget.session.samples.first.timestampMs;
+    return _rPeaks.map((i) => widget.session.samples[i].timestampMs - base).toList();
+  }
+
+  /// Start of the currently visible window, in ms elapsed from recording start.
+  int get _currentElapsedMs {
+    if (_isFileBacked) return _windowStart * 2;
+    if (widget.session.samples.isEmpty) return 0;
+    return widget.session.samples[_windowStart].timestampMs -
+        widget.session.samples.first.timestampMs;
+  }
+
+  /// Total recording length in ms.
+  int get _totalElapsedMs {
+    if (_isFileBacked) return _totalSamples * 2;
+    if (widget.session.samples.isEmpty) return 0;
+    return widget.session.samples.last.timestampMs -
+        widget.session.samples.first.timestampMs;
+  }
+
+  /// Computes RMSSD over [startMs, startMs+durationMs] (elapsed-ms basis).
+  ({double? rmssd, int beats}) _computeRmssd(int startMs, int durationMs) {
+    final endMs = startMs + durationMs;
+    final peaks = _peaksElapsedMs()
+        .where((t) => t >= startMs && t <= endMs)
+        .toList();
+    return (rmssd: HrvCalculator.rmssdForSeries(peaks), beats: peaks.length);
+  }
+
+  Future<void> _openRmssdMenu() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (ctx) => _RmssdMenuSheet(
+        currentStartMs: _currentElapsedMs,
+        totalMs:        _totalElapsedMs,
+        initialDurationMs: _rmssdDurationMs,
+        lastResult:     _rmssdValue,
+        compute:        _computeRmssd,
+        onDurationChanged: (d) => _rmssdDurationMs = d,
+        onResult: (v) => setState(() => _rmssdValue = v),
+      ),
+    );
+  }
+
   // ── Build ─────────────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
+    final l         = context.l10n;
     final session   = widget.session;
     final visible   = _visibleSamples;
     // used only to filter HR points to the visible window
@@ -326,6 +480,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
     final plotBands = [
       ..._leadOffBands(),
       ..._disconnectBands(),
+      ..._episodeBands(),
     ];
 
     return Scaffold(
@@ -335,42 +490,43 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
           children: [
             Text(session.sourceFile, style: const TextStyle(fontSize: 16)),
             Text(
-              '${session.sampleCount} Samples · ${_formatDuration(session.duration)}',
+              l.sessionHeaderSub(
+                  session.sampleCount, _formatDuration(session.duration)),
               style: const TextStyle(fontSize: 12),
             ),
           ],
         ),
         actions: [
           IconButton(
-            tooltip: _showRPeaks ? 'R-Peaks ausblenden' : 'R-Peaks anzeigen',
+            tooltip: _showRPeaks ? l.tooltipRPeaksHide : l.tooltipRPeaksShow,
             icon: Icon(Icons.scatter_plot,
                 color: _showRPeaks ? Colors.red : null),
             onPressed: () => setState(() => _showRPeaks = !_showRPeaks),
           ),
           if (hasHr)
             IconButton(
-              tooltip: _showHr ? 'HR ausblenden' : 'HR anzeigen',
+              tooltip: _showHr ? l.tooltipHrHide : l.tooltipHrShow,
               icon: Icon(Icons.monitor_heart,
                   color: _showHr ? Colors.green : null),
               onPressed: () => setState(() => _showHr = !_showHr),
             ),
           if (hasLo)
             IconButton(
-              tooltip: _showLeadOff ? 'Lead-Off ausblenden' : 'Lead-Off anzeigen',
+              tooltip: _showLeadOff ? l.tooltipLeadOffHide : l.tooltipLeadOffShow,
               icon: Icon(Icons.electric_bolt,
                   color: _showLeadOff ? Colors.orange : null),
               onPressed: () => setState(() => _showLeadOff = !_showLeadOff),
             ),
           if (hasDc)
             IconButton(
-              tooltip: _showDisconnect ? 'Abbrüche ausblenden' : 'Abbrüche anzeigen',
+              tooltip: _showDisconnect ? l.tooltipDisconnectHide : l.tooltipDisconnectShow,
               icon: Icon(Icons.bluetooth_disabled,
                   color: _showDisconnect ? Colors.red : null),
               onPressed: () => setState(() => _showDisconnect = !_showDisconnect),
             ),
           if (!_isFileBacked)
             IconButton(
-              tooltip: _showFiltered ? 'Roh anzeigen' : 'Gefiltert anzeigen',
+              tooltip: _showFiltered ? l.tooltipShowRaw : l.tooltipShowFiltered,
               icon: Icon(
                   _showFiltered ? Icons.filter_alt : Icons.filter_alt_off),
               onPressed: () => setState(() => _showFiltered = !_showFiltered),
@@ -382,9 +538,9 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
           _SummaryBar(
             session: session,
             meanBpm: _localMeanBpm,
-            rPeakCount: _isFileBacked
-                ? session.rPeakIndices.length
-                : _rPeaks.length,
+            sdnn: _sdnn,
+            rmssd: _rmssdValue,
+            onRmssdTap: _openRmssdMenu,
             events: _events,
           ),
           Expanded(
@@ -405,28 +561,26 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                         },
                         child: SfCartesianChart(
                           primaryXAxis: NumericAxis(
-                            title: AxisTitle(text: 'Zeit'),
+                            title: AxisTitle(text: l.axisTime),
                             interval: _axisIntervalMs.toDouble(),
                             axisLabelFormatter: (AxisLabelRenderDetails d) {
-                              if (!_isFileBacked) {
-                                return ChartAxisLabel(
-                                  _formatAsViennaTime(d.value.toInt()),
-                                  d.textStyle,
-                                );
-                              }
-                              final dur = Duration(milliseconds: d.value.toInt());
-                              final h = dur.inHours;
-                              final m = dur.inMinutes.remainder(60).toString().padLeft(2, '0');
-                              final s = dur.inSeconds.remainder(60).toString().padLeft(2, '0');
+                              // File-backed X values are recording-relative;
+                              // add the recording's first wall-clock timestamp
+                              // to show real Vienna time. In-memory X values are
+                              // already absolute sample timestamps.
+                              final absMs = _isFileBacked
+                                  ? d.value.toInt() +
+                                      widget.session.firstSampleTimestampMs
+                                  : d.value.toInt();
                               return ChartAxisLabel(
-                                h > 0 ? '$h:$m:$s' : '$m:$s',
+                                _formatAsViennaTime(absMs),
                                 d.textStyle,
                               );
                             },
                             plotBands: plotBands,
                           ),
                           primaryYAxis:
-                              NumericAxis(title: AxisTitle(text: 'ADC')),
+                              NumericAxis(title: AxisTitle(text: l.axisAdc)),
                           axes: _showHr && hasHr
                               ? <ChartAxis>[
                                   NumericAxis(
@@ -435,7 +589,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                                     minimum: 30,
                                     maximum: 220,
                                     interval: 30,
-                                    title: AxisTitle(text: 'HR (bpm)'),
+                                    title: AxisTitle(text: l.axisHr),
                                   ),
                                 ]
                               : const [],
@@ -506,12 +660,20 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
           ),
           _buildControls(session),
           if (_events.isNotEmpty)
-            _EventList(events: _events, onTap: _jumpToEvent),
+            _EventNavigatorBar(
+              events: _events,
+              selectedIndex: _selectedEvent.clamp(0, _events.length - 1),
+              onPrev: () => _selectEvent(_selectedEvent - 1),
+              onNext: () => _selectEvent(_selectedEvent + 1),
+              onMenu: _openEventMenu,
+              onTapDisplay: () => _selectEvent(_selectedEvent),
+              timeFmt: _eventTimeFmt,
+            ),
           if (session.skippedPackets > 0)
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
               child: Text(
-                '${session.skippedPackets} fehlerhafte Pakete übersprungen',
+                l.skippedPackets(session.skippedPackets),
                 style: TextStyle(
                     color: Theme.of(context).colorScheme.error,
                     fontSize: 12),
@@ -530,7 +692,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
           IconButton(
             icon: const Icon(Icons.zoom_in),
             iconSize: 20,
-            tooltip: 'Vergrößern',
+            tooltip: context.l10n.zoomIn,
             onPressed: _windowSize > _minWindowSize
                 ? () => setState(() {
                       _windowSize =
@@ -542,7 +704,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
           IconButton(
             icon: const Icon(Icons.zoom_out),
             iconSize: 20,
-            tooltip: 'Verkleinern',
+            tooltip: context.l10n.zoomOut,
             onPressed: _windowSize < _maxWindowSize
                 ? () => setState(() {
                       _windowSize =
@@ -594,18 +756,23 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
 class _SummaryBar extends StatelessWidget {
   final ImportedSession session;
   final double meanBpm;
-  final int rPeakCount;
+  final double? sdnn;
+  final double? rmssd;
+  final VoidCallback onRmssdTap;
   final List<DetectedEvent> events;
 
   const _SummaryBar({
     required this.session,
     required this.meanBpm,
-    required this.rPeakCount,
+    required this.sdnn,
+    required this.rmssd,
+    required this.onRmssdTap,
     required this.events,
   });
 
   @override
   Widget build(BuildContext context) {
+    final l       = context.l10n;
     final tachy   = events.where((e) => e.type == EcgEventType.tachycardia).length;
     final brady   = events.where((e) => e.type == EcgEventType.bradycardia).length;
     final pauses  = events.where((e) => e.type == EcgEventType.pause).length;
@@ -618,13 +785,29 @@ class _SummaryBar extends StatelessWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          _Stat(label: 'Ø HR', value: '${meanBpm.round()} bpm'),
-          _Stat(label: 'R-Peaks', value: '$rPeakCount'),
-          if (tachy  > 0) _Stat(label: 'Tachy',    value: '$tachy',   color: Colors.orange),
-          if (brady  > 0) _Stat(label: 'Brady',    value: '$brady',   color: Colors.blue),
-          if (pauses > 0) _Stat(label: 'Pausen',   value: '$pauses',  color: Colors.red),
-          if (loCount > 0) _Stat(label: 'Lead-Off', value: '$loCount×', color: Colors.orange.shade800),
-          if (dcCount > 0) _Stat(label: 'Abbrüche', value: '$dcCount×', color: Colors.red),
+          _Stat(label: l.statAvgHr, value: '${meanBpm.round()} bpm'),
+          _Stat(
+            label: l.statSdnn,
+            value: sdnn != null ? '${sdnn!.round()} ms' : '—',
+          ),
+          // Tappable → opens the RMSSD menu.
+          InkWell(
+            onTap: onRmssdTap,
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              child: _Stat(
+                label: l.statRmssd,
+                value: rmssd != null ? '${rmssd!.round()} ms' : l.rmssdOpen,
+                color: Theme.of(context).colorScheme.primary,
+              ),
+            ),
+          ),
+          if (tachy  > 0) _Stat(label: l.statTachy,  value: '$tachy',   color: Colors.orange),
+          if (brady  > 0) _Stat(label: l.statBrady,  value: '$brady',   color: Colors.blue),
+          if (pauses > 0) _Stat(label: l.statPauses, value: '$pauses',  color: Colors.red),
+          if (loCount > 0) _Stat(label: l.statLeadOff, value: '$loCount×', color: Colors.orange.shade800),
+          if (dcCount > 0) _Stat(label: l.statDisconnects, value: '$dcCount×', color: Colors.red),
         ],
       ),
     );
@@ -653,34 +836,145 @@ class _Stat extends StatelessWidget {
   }
 }
 
-// ── Event list ────────────────────────────────────────────────────────────────
+// ── Event formatting helpers (shared) ──────────────────────────────────────────
 
-class _EventList extends StatelessWidget {
+String _fmtEventTs(int ms) {
+  final d = Duration(milliseconds: ms);
+  final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+  final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+  return '$m:$s';
+}
+
+String _fmtEventDuration(int ms) {
+  if (ms >= 60000) {
+    final m = ms ~/ 60000;
+    final s = (ms % 60000) ~/ 1000;
+    return '${m}m ${s}s';
+  }
+  return '${ms ~/ 1000}s';
+}
+
+({String title, Color color, String detail, String time}) _eventVisuals(
+    AppLocalizations l, DetectedEvent e, {String Function(int)? timeFmt}) {
+  final dur = e.durationMs;
+  final bpm = e.metadata?['bpm'];
+  final fmt = timeFmt ?? _fmtEventTs;
+
+  final (title, color) = switch (e.type) {
+    EcgEventType.tachycardia => (l.evtTachycardia, Colors.orange),
+    EcgEventType.bradycardia => (l.evtBradycardia, Colors.blue),
+    EcgEventType.pause       => (l.evtPause, Colors.red),
+    EcgEventType.leadOff     => (l.evtLeadOff, Colors.orange.shade800),
+    _                        => (e.type.name, Colors.grey),
+  };
+
+  final time = (dur != null && dur > 0)
+      ? '${fmt(e.timestampMs)} – ${fmt(e.timestampMs + dur)}'
+      : fmt(e.timestampMs);
+
+  final detail = switch (e.type) {
+    EcgEventType.pause   => '${e.durationMs} ms',
+    EcgEventType.leadOff => dur != null ? _fmtEventDuration(dur) : l.evtContactLoss,
+    _ => [
+        if (bpm != null) '$bpm bpm',
+        if (dur != null && dur > 0) _fmtEventDuration(dur),
+      ].join(' · '),
+  };
+
+  return (title: title, color: color, detail: detail, time: time);
+}
+
+// ── Event navigator bar (prev / display / next / menu) ──────────────────────────
+
+class _EventNavigatorBar extends StatelessWidget {
   final List<DetectedEvent> events;
-  final void Function(DetectedEvent)? onTap;
+  final int selectedIndex;
+  final VoidCallback onPrev;
+  final VoidCallback onNext;
+  final VoidCallback onMenu;
+  final VoidCallback onTapDisplay;
+  final String Function(int) timeFmt;
 
-  const _EventList({required this.events, this.onTap});
+  const _EventNavigatorBar({
+    required this.events,
+    required this.selectedIndex,
+    required this.onPrev,
+    required this.onNext,
+    required this.onMenu,
+    required this.onTapDisplay,
+    required this.timeFmt,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 120,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    final l = context.l10n;
+    final e = events[selectedIndex];
+    final v = _eventVisuals(l, e, timeFmt: timeFmt);
+
+    return Container(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+      child: Row(
         children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 6, 0, 2),
-            child: Text('Ereignisse',
-                style: Theme.of(context).textTheme.labelMedium),
+          IconButton(
+            icon: const Icon(Icons.chevron_left),
+            tooltip: l.prevEvent,
+            onPressed: selectedIndex > 0 ? onPrev : null,
           ),
           Expanded(
-            child: ListView.builder(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              itemCount: events.length,
-              itemBuilder: (_, i) =>
-                  _EventChip(event: events[i], onTap: onTap),
+            child: InkWell(
+              onTap: onTapDisplay,
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 10,
+                          height: 10,
+                          decoration: BoxDecoration(
+                              color: v.color, shape: BoxShape.circle),
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(
+                            v.title,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: v.color,
+                                fontSize: 14),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '${v.detail}  ·  ${v.time}',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    Text(
+                      l.eventCounter(selectedIndex + 1, events.length),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
             ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.chevron_right),
+            tooltip: l.nextEvent,
+            onPressed: selectedIndex < events.length - 1 ? onNext : null,
+          ),
+          IconButton(
+            icon: const Icon(Icons.list),
+            tooltip: l.eventListTooltip,
+            onPressed: onMenu,
           ),
         ],
       ),
@@ -688,48 +982,324 @@ class _EventList extends StatelessWidget {
   }
 }
 
-class _EventChip extends StatelessWidget {
-  final DetectedEvent event;
-  final void Function(DetectedEvent)? onTap;
+// ── Event menu (bottom sheet with full list) ────────────────────────────────────
 
-  const _EventChip({required this.event, this.onTap});
+class _EventMenuSheet extends StatelessWidget {
+  final List<DetectedEvent> events;
+  final int selectedIndex;
+  final String Function(int) timeFmt;
+
+  const _EventMenuSheet({
+    required this.events,
+    required this.selectedIndex,
+    required this.timeFmt,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final (label, color) = switch (event.type) {
-      EcgEventType.tachycardia =>
-        ('Tachy\n${event.metadata?['bpm']} bpm', Colors.orange),
-      EcgEventType.bradycardia =>
-        ('Brady\n${event.metadata?['bpm']} bpm', Colors.blue),
-      EcgEventType.pause =>
-        ('Pause\n${event.durationMs} ms', Colors.red),
-      _ => (event.type.name, Colors.grey),
-    };
+    final l = context.l10n;
+    return SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.7,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
+              child: Row(
+                children: [
+                  Text(l.eventsTitle(events.length),
+                      style: Theme.of(context).textTheme.titleMedium),
+                  const Spacer(),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    tooltip: l.close,
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Flexible(
+              child: ListView.builder(
+                itemCount: events.length,
+                itemBuilder: (_, i) {
+                  final v = _eventVisuals(l, events[i], timeFmt: timeFmt);
+                  return ListTile(
+                    selected: i == selectedIndex,
+                    leading: Container(
+                      width: 12,
+                      height: 12,
+                      decoration:
+                          BoxDecoration(color: v.color, shape: BoxShape.circle),
+                    ),
+                    title: Text(v.title,
+                        style: TextStyle(
+                            color: v.color, fontWeight: FontWeight.bold)),
+                    subtitle: Text('${v.detail}  ·  ${v.time}'),
+                    onTap: () => Navigator.pop(context, i),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
-    final ts      = Duration(milliseconds: event.timestampMs);
-    final timeStr =
-        '${ts.inMinutes.remainder(60).toString().padLeft(2, '0')}:'
-        '${ts.inSeconds.remainder(60).toString().padLeft(2, '0')}';
+// ── RMSSD menu (bottom sheet: compute over a chosen window) ─────────────────────
 
-    return Padding(
-      padding: const EdgeInsets.only(right: 8),
-      child: GestureDetector(
-        onTap: onTap != null ? () => onTap!(event) : null,
-        child: Chip(
-          backgroundColor: color.withAlpha(40),
-          side: BorderSide(color: color, width: 1),
-          label: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Text(label,
-                  textAlign: TextAlign.center,
+class _RmssdMenuSheet extends StatefulWidget {
+  /// Start of the currently visible window (ms elapsed from recording start).
+  final int currentStartMs;
+
+  /// Total recording length in ms.
+  final int totalMs;
+
+  /// Initial window duration in ms (default 90 s).
+  final int initialDurationMs;
+
+  /// Last RMSSD computed in a previous session of this menu (ms), or null.
+  final double? lastResult;
+
+  /// Computes RMSSD over [startMs, startMs+durationMs].
+  final ({double? rmssd, int beats}) Function(int startMs, int durationMs) compute;
+
+  final void Function(int durationMs) onDurationChanged;
+  final void Function(double?) onResult;
+
+  const _RmssdMenuSheet({
+    required this.currentStartMs,
+    required this.totalMs,
+    required this.initialDurationMs,
+    required this.lastResult,
+    required this.compute,
+    required this.onDurationChanged,
+    required this.onResult,
+  });
+
+  @override
+  State<_RmssdMenuSheet> createState() => _RmssdMenuSheetState();
+}
+
+class _RmssdMenuSheetState extends State<_RmssdMenuSheet> {
+  late final TextEditingController _durationCtrl;
+  late final TextEditingController _startCtrl;
+
+  double? _result;
+  int     _resultBeats   = 0;
+  int?    _resultStartMs;
+  int?    _resultDurMs;
+
+  @override
+  void initState() {
+    super.initState();
+    _durationCtrl =
+        TextEditingController(text: (widget.initialDurationMs ~/ 1000).toString());
+    _startCtrl =
+        TextEditingController(text: (widget.currentStartMs ~/ 1000).toString());
+    _result = widget.lastResult;
+  }
+
+  @override
+  void dispose() {
+    _durationCtrl.dispose();
+    _startCtrl.dispose();
+    super.dispose();
+  }
+
+  int? get _durationMs {
+    final s = int.tryParse(_durationCtrl.text.trim());
+    if (s == null || s <= 0) return null;
+    return s * 1000;
+  }
+
+  int? get _manualStartMs {
+    final s = int.tryParse(_startCtrl.text.trim());
+    if (s == null || s < 0) return null;
+    return s * 1000;
+  }
+
+  bool _fits(int startMs, int durationMs) =>
+      startMs >= 0 && startMs + durationMs <= widget.totalMs;
+
+  void _run(int startMs) {
+    final durMs = _durationMs;
+    if (durMs == null || !_fits(startMs, durMs)) return;
+    final r = widget.compute(startMs, durMs);
+    widget.onDurationChanged(durMs);
+    widget.onResult(r.rmssd);
+    setState(() {
+      _result        = r.rmssd;
+      _resultBeats   = r.beats;
+      _resultStartMs = startMs;
+      _resultDurMs   = durMs;
+    });
+  }
+
+  static String _fmtMmSs(int ms) {
+    final d = Duration(milliseconds: ms);
+    final m = d.inMinutes.toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$m:$s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final l            = context.l10n;
+    final durMs        = _durationMs;
+    final canCreateHere = durMs != null && _fits(widget.currentStartMs, durMs);
+    final manualStart  = _manualStartMs;
+    final canCreateCustom = durMs != null &&
+        manualStart != null &&
+        _fits(manualStart, durMs);
+
+    return SafeArea(
+      child: Padding(
+        padding: EdgeInsets.only(
+          left: 16, right: 16, top: 4,
+          bottom: 16 + MediaQuery.of(context).viewInsets.bottom,
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(l.rmssdTitle, style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.close),
+                  tooltip: l.close,
+                  onPressed: () => Navigator.pop(context),
+                ),
+              ],
+            ),
+
+            // ── Result ──────────────────────────────────────────────────────
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _resultStartMs == null
+                        ? l.rmssdNotComputed
+                        : _result != null
+                            ? '${_result!.round()} ms'
+                            : l.rmssdNa,
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ),
+                  if (_resultStartMs != null)
+                    Text(
+                      _result != null
+                          ? l.rmssdResultDetail(
+                              _fmtMmSs(_resultStartMs!),
+                              _resultDurMs! ~/ 1000,
+                              _resultBeats)
+                          : l.rmssdTooFewBeats(_resultBeats),
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // ── Duration ────────────────────────────────────────────────────
+            Row(
+              children: [
+                Expanded(child: Text(l.rmssdWindowLength)),
+                SizedBox(
+                  width: 90,
+                  child: TextField(
+                    controller: _durationCtrl,
+                    keyboardType: TextInputType.number,
+                    textAlign: TextAlign.end,
+                    decoration: const InputDecoration(
+                      suffixText: 's',
+                      isDense: true,
+                    ),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+
+            // ── Create at current position ───────────────────────────────────
+            FilledButton.icon(
+              style: FilledButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+              icon: const Icon(Icons.add_chart),
+              label: Text(l.rmssdCreateHere(_fmtMmSs(widget.currentStartMs))),
+              onPressed: canCreateHere ? () => _run(widget.currentStartMs) : null,
+            ),
+            if (durMs != null && !canCreateHere)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  l.rmssdNotEnoughAfter(durMs ~/ 1000),
                   style: TextStyle(
-                      fontSize: 11,
-                      color: color,
-                      fontWeight: FontWeight.bold)),
-              Text(timeStr, style: const TextStyle(fontSize: 10)),
-            ],
-          ),
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+
+            const Divider(height: 28),
+
+            // ── Custom range ─────────────────────────────────────────────────
+            Text(l.rmssdCustomRange,
+                style: Theme.of(context).textTheme.labelLarge),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(child: Text(l.rmssdStartTime)),
+                SizedBox(
+                  width: 90,
+                  child: TextField(
+                    controller: _startCtrl,
+                    keyboardType: TextInputType.number,
+                    textAlign: TextAlign.end,
+                    decoration: const InputDecoration(
+                      suffixText: 's',
+                      isDense: true,
+                    ),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(minimumSize: const Size.fromHeight(48)),
+              icon: const Icon(Icons.timeline),
+              label: Text(l.rmssdComputeRange),
+              onPressed:
+                  canCreateCustom ? () => _run(manualStart) : null,
+            ),
+            if (durMs != null && manualStart != null && !canCreateCustom)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  l.rmssdOutOfRange(_fmtMmSs(widget.totalMs)),
+                  style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.error),
+                ),
+              ),
+          ],
         ),
       ),
     );

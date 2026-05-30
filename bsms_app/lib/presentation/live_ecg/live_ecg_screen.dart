@@ -7,8 +7,21 @@ import '../../data/ble/ecg_packet.dart';
 import '../../data/storage/person_repository.dart';
 import '../../domain/ecg_sample.dart';
 import '../../domain/models/person.dart';
+import '../../l10n/app_localizations.dart';
+import '../../l10n/l10n_ext.dart';
 import '../history/imported_session_screen.dart';
 import '../persons/person_form.dart';
+
+/// Connection status, mapped to a localized label at display time.
+enum LiveStatus { notConnected, searching, connected, connectionLost, disconnected }
+
+String _statusLabel(AppLocalizations l, LiveStatus s) => switch (s) {
+      LiveStatus.notConnected   => l.statusNotConnected,
+      LiveStatus.searching      => l.statusSearching,
+      LiveStatus.connected      => l.statusConnected,
+      LiveStatus.connectionLost => l.statusConnectionLost,
+      LiveStatus.disconnected   => l.statusDisconnected,
+    };
 
 class LiveEcgScreen extends StatefulWidget {
   final EcgBleService bleService;
@@ -33,8 +46,9 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
   final List<EcgSample> _liveBuffer = [];
   int _packetsSinceUpdate = 0;
   bool _bleConnected = false;
-  String _status = 'Nicht verbunden';
+  LiveStatus _status = LiveStatus.notConnected;
   int _lastPacketHr = 0; // HR reported by ESP firmware, shown outside recording
+  int _leadOffFlags = 0; // bit0=LO+, bit1=LO- ; 0 = both electrodes attached
 
   RecordingStatus? _recStatus;
   StreamSubscription<EcgPacket>? _packetSub;
@@ -47,11 +61,12 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
     _connSub = widget.bleService.connectionState.listen((connected) {
       setState(() {
         _bleConnected = connected;
-        _status = connected ? 'Verbunden' : 'Verbindung getrennt';
+        _status = connected ? LiveStatus.connected : LiveStatus.connectionLost;
         if (!connected) {
           // Clear stale samples so the chart starts clean on reconnect.
           _liveBuffer.clear();
           _lastPacketHr = 0;
+          _leadOffFlags = 0;
         }
       });
     });
@@ -71,6 +86,14 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
 
   void _onPacket(EcgPacket packet) {
     if (packet.heartRate > 0) _lastPacketHr = packet.heartRate;
+
+    // Lead-off (electrode contact loss) — update immediately on change so the
+    // warning banner pops up without waiting for the throttled chart refresh.
+    final lo = packet.flags & 0x03;
+    if (lo != _leadOffFlags) {
+      _leadOffFlags = lo;
+      if (mounted) setState(() {});
+    }
 
     final base = packet.timestamp.millisecondsSinceEpoch;
     for (int i = 0; i < packet.samples.length; i++) {
@@ -92,14 +115,14 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
   // ── BLE ───────────────────────────────────────────────────────────────────
 
   Future<void> _startBle() async {
-    setState(() => _status = 'Suche Gerät …');
+    setState(() => _status = LiveStatus.searching);
     await widget.bleService.start();
   }
 
   Future<void> _stopBle() async {
     if (widget.recordingService.isRecording) await _stopRecording();
     await widget.bleService.stop();
-    setState(() { _bleConnected = false; _status = 'Getrennt'; });
+    setState(() { _bleConnected = false; _status = LiveStatus.disconnected; });
   }
 
   // ── Recording ─────────────────────────────────────────────────────────────
@@ -149,23 +172,24 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final l = context.l10n;
     final isRecording = widget.recordingService.isRecording;
     final visible = List<EcgSample>.from(_liveBuffer);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Live EKG'),
+        title: Text(l.liveEcgTitle),
         actions: [
           // BLE connect / disconnect
           _bleConnected
               ? IconButton(
                   icon: const Icon(Icons.bluetooth_disabled),
-                  tooltip: 'BLE trennen',
+                  tooltip: l.bleDisconnectTooltip,
                   onPressed: _stopBle,
                 )
               : IconButton(
                   icon: const Icon(Icons.bluetooth_searching),
-                  tooltip: 'BLE verbinden',
+                  tooltip: l.bleConnectTooltip,
                   onPressed: _startBle,
                 ),
         ],
@@ -181,6 +205,9 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
             formatElapsed: _formatElapsed,
           ),
 
+          // Lead-off warning banner
+          if (_leadOffFlags != 0) _LeadOffBanner(flags: _leadOffFlags),
+
           // Live ECG chart
           Expanded(
             child: Padding(
@@ -188,9 +215,7 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
               child: visible.isEmpty
                   ? Center(
                       child: Text(
-                        _bleConnected
-                            ? 'Warte auf Daten …'
-                            : 'Kein BLE-Gerät verbunden',
+                        _bleConnected ? l.waitingForData : l.noBleDevice,
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
                     )
@@ -234,8 +259,10 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
                     ),
                     icon: const Icon(Icons.stop),
                     label: Text(
-                      'Aufnahme stoppen'
-                      '${_recStatus != null ? "  (${_formatElapsed(_recStatus!.elapsed)})" : ""}',
+                      l.recordStop +
+                          (_recStatus != null
+                              ? '  (${_formatElapsed(_recStatus!.elapsed)})'
+                              : ''),
                     ),
                     onPressed: _stopRecording,
                   )
@@ -244,9 +271,56 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
                       minimumSize: const Size.fromHeight(52),
                     ),
                     icon: const Icon(Icons.fiber_manual_record),
-                    label: const Text('Aufnahme starten'),
+                    label: Text(l.recordStart),
                     onPressed: _bleConnected ? _startRecording : null,
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Lead-off warning banner ─────────────────────────────────────────────────────
+
+class _LeadOffBanner extends StatelessWidget {
+  final int flags; // bit0 = LO+, bit1 = LO-
+  const _LeadOffBanner({required this.flags});
+
+  @override
+  Widget build(BuildContext context) {
+    final l = context.l10n;
+    final both = (flags & 0x03) == 0x03;
+    final plus = (flags & 0x01) != 0;
+    final detail = both
+        ? l.leadOffDetailBoth
+        : l.leadOffDetailOne(plus ? 'LO+' : 'LO−');
+
+    return Container(
+      width: double.infinity,
+      color: Colors.red.shade700,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        children: [
+          const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 24),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  l.leadOffTitle,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15),
+                ),
+                Text(
+                  l.leadOffHint(detail),
+                  style: const TextStyle(color: Colors.white, fontSize: 12),
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -257,7 +331,7 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
 // ── Status bar ────────────────────────────────────────────────────────────────
 
 class _StatusBar extends StatelessWidget {
-  final String status;
+  final LiveStatus status;
   final bool connected;
   final RecordingStatus? recStatus;
   final int liveHr;
@@ -273,6 +347,7 @@ class _StatusBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l = context.l10n;
     final isRecording = recStatus != null;
     final hrToShow = isRecording ? recStatus!.currentHr : liveHr;
 
@@ -287,7 +362,9 @@ class _StatusBar extends StatelessWidget {
             color: connected ? Colors.green : Colors.grey,
           ),
           const SizedBox(width: 8),
-          Expanded(child: Text(status, style: const TextStyle(fontSize: 13))),
+          Expanded(
+              child: Text(_statusLabel(l, status),
+                  style: const TextStyle(fontSize: 13))),
           if (isRecording) ...[
             const Icon(Icons.circle, size: 10, color: Colors.red),
             const SizedBox(width: 4),
@@ -299,9 +376,17 @@ class _StatusBar extends StatelessWidget {
           ],
           if (hrToShow > 0)
             Text(
-              '$hrToShow bpm',
+              l.bpm(hrToShow),
               style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
             ),
+          // Live HRV (RMSSD) during recording, parallel to HR.
+          if (isRecording && recStatus!.rmssd != null) ...[
+            const SizedBox(width: 10),
+            Text(
+              l.hrv(recStatus!.rmssd!.round()),
+              style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+            ),
+          ],
         ],
       ),
     );
@@ -325,6 +410,7 @@ class _PersonPickerSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l = context.l10n;
     return SafeArea(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -332,24 +418,24 @@ class _PersonPickerSheet extends StatelessWidget {
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text('Person auswählen',
+            child: Text(l.personPickTitle,
                 style: Theme.of(context).textTheme.titleMedium),
           ),
           if (persons.isEmpty)
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              child: Text('Noch keine Personen — bitte zuerst anlegen.'),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              child: Text(l.personNoneYet),
             ),
           ...persons.map((p) => ListTile(
                 leading: CircleAvatar(child: Text(p.name[0].toUpperCase())),
                 title: Text(p.name),
-                subtitle: Text('${p.age} Jahre'),
+                subtitle: Text(l.personAge(p.age)),
                 onTap: () => onSelected(p),
               )),
           const Divider(),
           ListTile(
             leading: const Icon(Icons.person_add),
-            title: const Text('Neue Person anlegen'),
+            title: Text(l.personCreateNew),
             onTap: () async {
               final result = await Navigator.push<Person>(
                 context,

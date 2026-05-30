@@ -2,7 +2,29 @@
   "permissions": {
     "allow": [
       "Bash(git -C c:/dev/BSMS diff HEAD --stat)",
-      "Bash(flutter analyze *)"
+      "Bash(flutter analyze *)",
+      "Bash(flutter pub *)",
+      "Bash(dart analyze *)",
+      "WebSearch",
+      "WebFetch(domain:arxiv.org)",
+      "WebFetch(domain:www.ncbi.nlm.nih.gov)",
+      "WebFetch(domain:pmc.ncbi.nlm.nih.gov)",
+      "WebFetch(domain:www.semanticscholar.org)",
+      "WebFetch(domain:en.wikipedia.org)",
+      "WebFetch(domain:iopscience.iop.org)",
+      "WebFetch(domain:medium.com)",
+      "WebFetch(domain:biomedical-engineering-online.biomedcentral.com)",
+      "WebFetch(domain:grokipedia.com)",
+      "WebFetch(domain:link.springer.com)",
+      "WebFetch(domain:www.researchgate.net)",
+      "WebFetch(domain:journals.plos.org)",
+      "WebFetch(domain:every-algorithm.github.io)",
+      "WebFetch(domain:encyclopedia.pub)",
+      "WebFetch(domain:handwiki.org)",
+      "WebFetch(domain:scis.scichina.com)",
+      "Bash(flutter test *)",
+      "Bash(Select-Object -Last 8)",
+      "Bash(flutter gen-l10n *)"
     ]
   }
 }

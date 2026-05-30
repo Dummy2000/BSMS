@@ -4,10 +4,10 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import '../../domain/ecg_sample.dart';
 import '../../domain/models/imported_session.dart';
 import '../../domain/models/person.dart';
 import '../storage/session_storage_service.dart';
+import '../../domain/processing/hrv_calculator.dart';
 import 'ecg_ble_service.dart';
 import 'ecg_packet.dart';
 import 'ecg_packet_parser.dart';
@@ -18,11 +18,16 @@ class RecordingStatus {
   final int currentHr;
   final bool connected;
 
+  /// Live RMSSD (ms) over a 90 s moving window, or null when not yet available
+  /// (window not full / heart rate too low). Updated ~every 10 s.
+  final double? rmssd;
+
   const RecordingStatus({
     required this.elapsed,
     required this.sampleCount,
     required this.currentHr,
     required this.connected,
+    this.rmssd,
   });
 }
 
@@ -58,6 +63,7 @@ class BleRecordingService {
   final List<DisconnectInterval> _disconnectIntervals = [];
 
   final _pipeline = _StreamingPipeline();
+  final _hrv = HrvCalculator(); // live 90 s RMSSD, recomputed every 10 s
 
   StreamSubscription<EcgPacket>? _packetSub;
   StreamSubscription<bool>?      _connSub;
@@ -86,6 +92,7 @@ class BleRecordingService {
     _leadOffIntervals.clear();
     _disconnectIntervals.clear();
     _pipeline.reset();
+    _hrv.reset();
 
     final dir = await _sessionsDirectory();
     _rawFile = await File('$dir/$_sessionId.bin').open(mode: FileMode.write);
@@ -193,7 +200,12 @@ class BleRecordingService {
     if (_firstSampleTsMs == 0) _firstSampleTsMs = pTsMs;
 
     // Write raw 51-byte block immediately — no sample buffering.
-    _rawFile!.writeFromSync(_serializePacket(packet));
+    try {
+      _rawFile!.writeFromSync(_serializePacket(packet));
+    } catch (e) {
+      _statusCtrl.addError('Schreibfehler (Speicher voll?): $e');
+      return; // drop this packet but keep recording so UI can show the error
+    }
     _packetCount++;
 
     // Periodic flush every 5 seconds (125 packets at 25 packets/s).
@@ -207,14 +219,20 @@ class BleRecordingService {
       final bd = ByteData(9);
       bd.setInt64(0, pTsMs, Endian.little);
       bd.setUint8(8, packet.heartRate);
-      _hrFile!.writeFromSync(bd.buffer.asUint8List());
+      try {
+        _hrFile!.writeFromSync(bd.buffer.asUint8List());
+      } catch (_) {} // HR is supplementary; ECG data loss is already reported above
     }
 
-    // Streaming R-peak detection — one sample at a time.
+    // Streaming R-peak detection — may return 0, 1 or 2 peaks per sample
+    // (searchback can retroactively yield a missed peak alongside a new one).
     for (int i = 0; i < packet.samples.length; i++) {
       final gIdx = _globalSampleIdx + i;
-      final peak = _pipeline.processSample(packet.samples[i], gIdx);
-      if (peak != null) _rPeakIndices.add(peak);
+      final peaks = _pipeline.processSample(packet.samples[i], gIdx);
+      for (final p in peaks) {
+        _rPeakIndices.add(p);
+        _hrv.addPeak(p * 2); // 2 ms/sample → recording-relative timestamp
+      }
     }
     _globalSampleIdx += packet.samples.length;
 
@@ -237,6 +255,7 @@ class BleRecordingService {
         sampleCount: _globalSampleIdx,
         currentHr:   _pipeline.currentHr,
         connected:   _bleConnected,
+        rmssd:       _hrv.rmssd,
       ));
     }
   }
@@ -264,90 +283,99 @@ class BleRecordingService {
 }
 
 // ── Streaming Pan-Tompkins pipeline ──────────────────────────────────────────
+//
+// Implements the full Pan & Tompkins (1985) algorithm with:
+//   • Dual threshold: SPKI (signal peaks) + NPKI (noise peaks)
+//   • T-wave discrimination: peaks within 360 ms at < 50 % amplitude → T-wave
+//   • Searchback: if no beat for > 1.66 × meanRR, re-scan buffer at 50 % threshold
+//   • Better initialisation: SPKI = 50 % of init max, NPKI = 5 % of init max
 
-/// Stateful single-sample ECG processing pipeline:
-/// HP filter → LP filter → Notch filter → differentiate → square →
-/// moving-window integrate → adaptive threshold.
-///
-/// Matches [EcgFilter] coefficients exactly so recorded and displayed signals
-/// are processed identically.
 class _StreamingPipeline {
   static const double _fs = 500.0;
 
-  // IIR filter coefficients (computed once in reset()).
-  late double _hp_b0, _hp_b1, _hp_b2, _hp_a1, _hp_a2;
-  late double _lp_b0, _lp_b1, _lp_b2, _lp_a1, _lp_a2;
-  late double _nt_b1, _nt_a1, _nt_a2; // b0=b2=1 for notch
+  // IIR filter coefficients (computed once in _computeCoefficients).
+  late double _hpB0, _hpB1, _hpB2, _hpA1, _hpA2;
+  late double _lpB0, _lpB1, _lpB2, _lpA1, _lpA2;
+  late double _ntB1, _ntA1, _ntA2; // notch: b0=b2=1
 
   // Filter state
-  double _hp_x1 = 0, _hp_x2 = 0, _hp_y1 = 0, _hp_y2 = 0;
-  double _lp_x1 = 0, _lp_x2 = 0, _lp_y1 = 0, _lp_y2 = 0;
-  double _nt_x1 = 0, _nt_x2 = 0, _nt_y1 = 0, _nt_y2 = 0;
+  double _hpX1 = 0, _hpX2 = 0, _hpY1 = 0, _hpY2 = 0;
+  double _lpX1 = 0, _lpX2 = 0, _lpY1 = 0, _lpY2 = 0;
+  double _ntX1 = 0, _ntX2 = 0, _ntY1 = 0, _ntY2 = 0;
 
-  // Pan-Tompkins state
+  // Pan-Tompkins differentiation + MWI
   final _diffBuf = List<double>.filled(5, 0.0);
   final _mwiBuf  = List<double>.filled(75, 0.0); // 150 ms at 500 Hz
   int    _mwiIdx = 0;
   double _mwiSum = 0.0;
 
-  // Adaptive threshold
+  // Threshold initialisation (first 2 s = 1000 samples)
   bool   _initialized = false;
   int    _initCount   = 0;
   double _initMax     = 0.0;
-  double _initSum     = 0.0;
+
+  // Adaptive thresholds
   double _spki = 0.0, _npki = 0.0;
 
   // Peak tracking
   bool   _tracking           = false;
   double _candidatePeak      = 0.0;
   int    _candidateGlobalIdx = -1;
-  int    _lastPeakGlobalIdx  = -100; // refractory 200 ms = 100 samples
+  int    _lastPeakGlobalIdx  = -100; // refractory guard
   int    _lastBeatGlobalIdx  = -1;
+  double _lastBeatMwi        = 0.0;  // T-wave reference amplitude
   double _hrSmoothed         = 0.0;
   int    _currentHr          = 0;
+
+  // Searchback: 2-second circular buffer of MWI values
+  static const int _sbSize = 1000;
+  final _sbBuf = List<double>.filled(1000, 0.0);
+  int    _sbHead          = 0;   // next-write position
+  int    _samplesSinceBeat = 0;  // samples elapsed since last confirmed beat
+  double _meanRrSamples   = 0.0; // exponential-avg RR interval (samples)
 
   int get currentHr => _currentHr;
 
   _StreamingPipeline() { _computeCoefficients(); }
 
   void reset() {
-    _hp_x1 = _hp_x2 = _hp_y1 = _hp_y2 = 0;
-    _lp_x1 = _lp_x2 = _lp_y1 = _lp_y2 = 0;
-    _nt_x1 = _nt_x2 = _nt_y1 = _nt_y2 = 0;
+    _hpX1 = _hpX2 = _hpY1 = _hpY2 = 0;
+    _lpX1 = _lpX2 = _lpY1 = _lpY2 = 0;
+    _ntX1 = _ntX2 = _ntY1 = _ntY2 = 0;
     _diffBuf.fillRange(0, 5, 0.0);
     _mwiBuf.fillRange(0, 75, 0.0);
     _mwiIdx = 0; _mwiSum = 0;
-    _initialized = false; _initCount = 0; _initMax = 0; _initSum = 0;
+    _initialized = false; _initCount = 0; _initMax = 0;
     _spki = 0; _npki = 0;
     _tracking = false; _candidatePeak = 0; _candidateGlobalIdx = -1;
     _lastPeakGlobalIdx = -100; _lastBeatGlobalIdx = -1;
-    _hrSmoothed = 0; _currentHr = 0;
+    _lastBeatMwi = 0; _hrSmoothed = 0; _currentHr = 0;
+    _sbBuf.fillRange(0, _sbSize, 0.0);
+    _sbHead = 0; _samplesSinceBeat = 0; _meanRrSamples = 0;
   }
 
-  /// Returns the global sample index of a detected R-peak, or null.
-  int? processSample(int rawValue, int globalIdx) {
-    // 1. HP 0.5 Hz
+  /// Returns global indices of detected R-peaks for this sample.
+  /// Normally 0 or 1; occasionally 2 when searchback fires on the same sample
+  /// as a new beat.
+  List<int> processSample(int rawValue, int globalIdx) {
+    // ── Filter chain ─────────────────────────────────────────────────────────
     final xi = rawValue.toDouble();
-    var y = _hp_b0*xi + _hp_b1*_hp_x1 + _hp_b2*_hp_x2 - _hp_a1*_hp_y1 - _hp_a2*_hp_y2;
-    _hp_x2 = _hp_x1; _hp_x1 = xi; _hp_y2 = _hp_y1; _hp_y1 = y;
+    var y = _hpB0*xi + _hpB1*_hpX1 + _hpB2*_hpX2 - _hpA1*_hpY1 - _hpA2*_hpY2;
+    _hpX2 = _hpX1; _hpX1 = xi; _hpY2 = _hpY1; _hpY1 = y;
 
-    // 2. LP 40 Hz
     final hpOut = y;
-    y = _lp_b0*hpOut + _lp_b1*_lp_x1 + _lp_b2*_lp_x2 - _lp_a1*_lp_y1 - _lp_a2*_lp_y2;
-    _lp_x2 = _lp_x1; _lp_x1 = hpOut; _lp_y2 = _lp_y1; _lp_y1 = y;
+    y = _lpB0*hpOut + _lpB1*_lpX1 + _lpB2*_lpX2 - _lpA1*_lpY1 - _lpA2*_lpY2;
+    _lpX2 = _lpX1; _lpX1 = hpOut; _lpY2 = _lpY1; _lpY1 = y;
 
-    // 3. Notch 50 Hz  (b0=b2=1)
     final lpOut = y;
-    y = lpOut + _nt_b1*_nt_x1 + _nt_x2 - _nt_a1*_nt_y1 - _nt_a2*_nt_y2;
-    _nt_x2 = _nt_x1; _nt_x1 = lpOut; _nt_y2 = _nt_y1; _nt_y1 = y;
+    y = lpOut + _ntB1*_ntX1 + _ntX2 - _ntA1*_ntY1 - _ntA2*_ntY2;
+    _ntX2 = _ntX1; _ntX1 = lpOut; _ntY2 = _ntY1; _ntY1 = y;
 
-    // 4. Differentiate (5-point Pan-Tompkins)
     _diffBuf[4] = _diffBuf[3]; _diffBuf[3] = _diffBuf[2];
     _diffBuf[2] = _diffBuf[1]; _diffBuf[1] = _diffBuf[0];
     _diffBuf[0] = y;
     final dx = (-_diffBuf[4] - 2*_diffBuf[3] + 2*_diffBuf[1] + _diffBuf[0]) / 8.0;
 
-    // 5. Square + 6. Moving-window integrate (150 ms)
     final sq = dx * dx;
     _mwiSum -= _mwiBuf[_mwiIdx];
     _mwiBuf[_mwiIdx] = sq;
@@ -355,26 +383,70 @@ class _StreamingPipeline {
     _mwiIdx = (_mwiIdx + 1) % 75;
     final mwi = _mwiSum / 75.0;
 
-    return _detectPeak(mwi, globalIdx);
+    // ── Searchback buffer ─────────────────────────────────────────────────────
+    _sbBuf[_sbHead] = mwi;
+    _sbHead = (_sbHead + 1) % _sbSize;
+    _samplesSinceBeat++;
+
+    return _detect(mwi, globalIdx);
   }
 
-  int? _detectPeak(double mwi, int globalIdx) {
-    // 2-second initialisation window
+  List<int> _detect(double mwi, int globalIdx) {
+    // ── 2-second initialisation ───────────────────────────────────────────────
     if (!_initialized) {
       if (mwi > _initMax) _initMax = mwi;
-      _initSum += mwi;
       _initCount++;
       if (_initCount >= 1000) {
-        _spki = _initMax / 3.0;
-        _npki = (_initSum / _initCount) / 2.0;
+        _spki = _initMax * 0.5;   // half of max → conservative signal estimate
+        _npki = _initMax * 0.05;  // 5 % of max → initial noise floor
         _initialized = true;
       }
-      return null;
+      return const [];
     }
 
-    final threshold = _npki + 0.25 * (_spki - _npki);
+    // ── Active threshold decay ──────────────────────────────────────────────
+    // If no beat for > 1.5 × meanRR, decay BOTH thresholds at 5.75 %/s (PLOS ONE
+    // 2016). Decaying SPKI alone is not enough: a noise burst can inflate NPKI
+    // so the threshold 0.75·NPKI + 0.25·SPKI stays locked high. Decaying both
+    // brings the whole threshold down so the signal is reacquired; both recover
+    // automatically once beats resume.
+    final decayGap = _meanRrSamples > 0 ? (_meanRrSamples * 1.5).round() : 700;
+    if (_samplesSinceBeat > decayGap) {
+      _spki *= 0.99988; // ≈ 5.75 %/s at 500 Hz
+      _npki *= 0.99988;
+    }
 
-    if (mwi > threshold) {
+    // ── HR timeout ───────────────────────────────────────────────────────────
+    // No beat for > 3 s (1500 samples → HR < 20, implausible): clear HR so the
+    // status shows "no value" instead of freezing. Reset the beat reference for
+    // a clean re-acquisition when the signal returns.
+    if (_lastBeatGlobalIdx >= 0 && _samplesSinceBeat > 1500) {
+      _currentHr         = 0;
+      _hrSmoothed        = 0;
+      _lastBeatGlobalIdx = -1;
+    }
+
+    final thr1 = _npki + 0.25 * (_spki - _npki);
+    final results = <int>[];
+
+    // ── Searchback ────────────────────────────────────────────────────────────
+    // Trigger when no beat for > 1.66 × mean RR (default 1.5 s if RR unknown).
+    final expectedGap = _meanRrSamples > 0
+        ? (_meanRrSamples * 1.66).round()
+        : 750;
+    if (_samplesSinceBeat > expectedGap) {
+      final sb = _searchback(globalIdx, thr1 * 0.5);
+      if (sb != null) {
+        results.add(sb);
+        // Discard any in-progress tracking so the current sample's elevated MWI
+        // (still in the tail of the just-found QRS) is not counted as a second beat.
+        _tracking      = false;
+        _candidatePeak = 0;
+      }
+    }
+
+    // ── Normal peak tracking ──────────────────────────────────────────────────
+    if (mwi > thr1) {
       if (!_tracking || mwi > _candidatePeak) {
         _candidatePeak      = mwi;
         _candidateGlobalIdx = globalIdx;
@@ -383,54 +455,103 @@ class _StreamingPipeline {
     } else if (_tracking) {
       _tracking = false;
       if (_candidateGlobalIdx - _lastPeakGlobalIdx >= 100) {
-        _spki = 0.125 * _candidatePeak + 0.875 * _spki;
-        int? result;
-        if (_lastBeatGlobalIdx >= 0) {
-          final rrSamples = _candidateGlobalIdx - _lastBeatGlobalIdx;
-          if (rrSamples > 0) {
-            final hrInst = (60 * 500 ~/ rrSamples).clamp(30, 220);
-            if (_hrSmoothed == 0) {
-              _hrSmoothed = hrInst.toDouble();
-            } else if ((hrInst - _hrSmoothed).abs() <= 30) {
-              _hrSmoothed = 0.2 * hrInst + 0.8 * _hrSmoothed;
-            }
-            _currentHr = _hrSmoothed.round();
-          }
+        // T-wave check: within 360 ms of last beat AND < 50 % of its amplitude.
+        final fromLastBeat = _candidateGlobalIdx - _lastBeatGlobalIdx;
+        if (_lastBeatGlobalIdx >= 0 &&
+            fromLastBeat < 180 &&
+            _candidatePeak < 0.5 * _lastBeatMwi) {
+          _npki = 0.125 * _candidatePeak + 0.875 * _npki;
+        } else {
+          // Cap SPKI increase to ×1.5 per beat (Biomed Eng Online) — prevents
+          // a single noise spike from inflating the threshold so high that real
+          // R-peaks are missed.
+          final rawSpki = 0.125 * _candidatePeak + 0.875 * _spki;
+          _spki = math.min(rawSpki, _spki * 1.5);
+          _confirmBeat(_candidateGlobalIdx, _candidatePeak);
+          results.add(_candidateGlobalIdx);
         }
-        _lastBeatGlobalIdx  = _candidateGlobalIdx;
-        _lastPeakGlobalIdx  = _candidateGlobalIdx;
-        result = _candidateGlobalIdx;
-        _candidatePeak = 0;
-        return result;
       } else {
         _npki = 0.125 * _candidatePeak + 0.875 * _npki;
-        _candidatePeak = 0;
       }
+      _candidatePeak = 0;
     }
-    return null;
+
+    return results;
   }
 
+  // ── Confirm a beat and update running estimates ───────────────────────────
+  void _confirmBeat(int idx, double mwiVal, {bool isSearchback = false}) {
+    if (_lastBeatGlobalIdx >= 0) {
+      final rr = idx - _lastBeatGlobalIdx;
+      // Only use RR intervals ≥ 125 samples (250 ms → < 240 BPM at 500 Hz).
+      // Shorter RRs are physiologically implausible and are artefacts of
+      // searchback + immediate normal-tracking double-detection.
+      if (rr >= 125) {
+        _meanRrSamples = _meanRrSamples == 0.0
+            ? rr.toDouble()
+            : 0.125 * rr + 0.875 * _meanRrSamples;
+        final hrInst = (60 * 500 ~/ rr).clamp(40, 200).toDouble();
+        // Pure exponential moving average — no hard rejection window.
+        // Recovers naturally (~10 beats) even if a bad beat shifts hrSmoothed.
+        _hrSmoothed = _hrSmoothed == 0.0
+            ? hrInst
+            : 0.2 * hrInst + 0.8 * _hrSmoothed;
+        _currentHr = _hrSmoothed.round();
+      }
+    }
+    // Searchback peaks may be noise artefacts — don't let them corrupt the
+    // T-wave reference amplitude used by the next discrimination check.
+    if (!isSearchback) _lastBeatMwi = mwiVal;
+    _lastBeatGlobalIdx = idx;
+    _lastPeakGlobalIdx = idx;
+    _samplesSinceBeat  = 0;
+  }
+
+  // ── Search the MWI buffer for the largest peak above halfThreshold ─────────
+  int? _searchback(int currentGlobalIdx, double halfThreshold) {
+    const refractory = 100; // 200 ms
+    final windowEnd  = math.min(_samplesSinceBeat, _sbSize);
+    if (windowEnd <= refractory) return null;
+
+    double maxMwi = 0;
+    int    bestK  = -1;
+    // k = samples before current sample; k=0 → current, k=1 → previous, …
+    for (int k = refractory; k < windowEnd; k++) {
+      final pos = ((_sbHead - 1 - k) % _sbSize + _sbSize) % _sbSize;
+      if (_sbBuf[pos] > maxMwi) { maxMwi = _sbBuf[pos]; bestK = k; }
+    }
+    if (bestK < 0 || maxMwi <= halfThreshold) return null;
+
+    final peakIdx = currentGlobalIdx - bestK;
+    // Searchback peaks use half the SPKI update weight (Pan-Tompkins recommendation)
+    // and are capped at ×1.3 — they are less reliable than normally-tracked peaks.
+    final rawSpki = 0.0625 * maxMwi + 0.9375 * _spki;
+    _spki = math.min(rawSpki, _spki * 1.3);
+    _confirmBeat(peakIdx, maxMwi, isSearchback: true);
+    // Override the 0 set by _confirmBeat: bestK samples have elapsed since peak.
+    _samplesSinceBeat = bestK;
+    return peakIdx;
+  }
+
+  // ── Filter coefficients (Butterworth bilinear transform) ─────────────────
   void _computeCoefficients() {
-    // HP 0.5 Hz (identical to EcgFilter)
-    var k    = math.tan(math.pi * 0.5 / _fs);
+    var k    = math.tan(math.pi * 0.5 / _fs);  // HP 0.5 Hz
     var k2   = k * k;
     var sq2k = math.sqrt(2) * k;
     var norm = 1.0 + sq2k + k2;
-    _hp_b0 = 1.0 / norm; _hp_b1 = -2.0 / norm; _hp_b2 = _hp_b0;
-    _hp_a1 = 2.0 * (k2 - 1.0) / norm; _hp_a2 = (1.0 - sq2k + k2) / norm;
+    _hpB0 = 1.0 / norm; _hpB1 = -2.0 / norm; _hpB2 = _hpB0;
+    _hpA1 = 2.0 * (k2 - 1.0) / norm; _hpA2 = (1.0 - sq2k + k2) / norm;
 
-    // LP 40 Hz
-    k = math.tan(math.pi * 40.0 / _fs);
+    k = math.tan(math.pi * 40.0 / _fs);        // LP 40 Hz
     k2 = k * k; sq2k = math.sqrt(2) * k; norm = 1.0 + sq2k + k2;
-    _lp_b0 = k2 / norm; _lp_b1 = 2.0 * k2 / norm; _lp_b2 = _lp_b0;
-    _lp_a1 = 2.0 * (k2 - 1.0) / norm; _lp_a2 = (1.0 - sq2k + k2) / norm;
+    _lpB0 = k2 / norm; _lpB1 = 2.0 * k2 / norm; _lpB2 = _lpB0;
+    _lpA1 = 2.0 * (k2 - 1.0) / norm; _lpA2 = (1.0 - sq2k + k2) / norm;
 
-    // Notch 50 Hz, BW=4 Hz
-    final omega0 = 2.0 * math.pi * 50.0 / _fs;
+    final omega0 = 2.0 * math.pi * 50.0 / _fs; // Notch 50 Hz, BW=4 Hz
     final cosW0  = math.cos(omega0);
     final r      = 1.0 - math.pi * 4.0 / _fs;
-    _nt_b1 = -2.0 * cosW0;
-    _nt_a1 = -2.0 * r * cosW0;
-    _nt_a2 = r * r;
+    _ntB1 = -2.0 * cosW0;
+    _ntA1 = -2.0 * r * cosW0;
+    _ntA2 = r * r;
   }
 }

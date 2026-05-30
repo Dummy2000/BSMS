@@ -1,30 +1,41 @@
-// This is a basic Flutter widget test.
-//
-// To perform an interaction with a widget in your test, use the WidgetTester
-// utility in the flutter_test package. For example, you can send tap and scroll
-// gestures. You can also use WidgetTester to find child widgets in the widget
-// tree, read text, and verify that the values of widget properties are correct.
+// Smoke test: the app builds and resolves localizations for each supported
+// locale, showing the localized bottom-navigation labels.
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:bsms_app/main.dart';
+import 'package:bsms_app/l10n/app_localizations.dart';
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('localized nav labels resolve per locale', (tester) async {
+    Future<void> pumpFor(Locale locale) async {
+      await tester.pumpWidget(MaterialApp(
+        locale: locale,
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: Builder(
+          builder: (context) {
+            final l = AppLocalizations.of(context);
+            return Text('${l.navLive}|${l.navHistory}|${l.navPersons}');
+          },
+        ),
+      ));
+      await tester.pumpAndSettle();
+    }
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    await pumpFor(const Locale('en'));
+    expect(find.text('Live ECG|History|People'), findsOneWidget);
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    await pumpFor(const Locale('de'));
+    expect(find.text('Live EKG|Verlauf|Personen'), findsOneWidget);
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    await pumpFor(const Locale('ja'));
+    expect(find.text('ライブ心電図|履歴|人物'), findsOneWidget);
+  });
+
+  test('all five locales are supported', () {
+    final codes =
+        AppLocalizations.supportedLocales.map((l) => l.languageCode).toSet();
+    expect(codes, containsAll(['en', 'de', 'es', 'fi', 'ja']));
   });
 }

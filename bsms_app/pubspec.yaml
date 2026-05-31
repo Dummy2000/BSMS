@@ -63,6 +63,7 @@ dependencies:
 
   # Runtime permission requests (Bluetooth, Location, Storage)
   permission_handler: ^11.3.1
+  google_fonts: ^8.1.0
 
 dev_dependencies:
   flutter_test:
@@ -88,6 +89,12 @@ flutter:
 
   # Generate localization classes from the .arb files in lib/l10n.
   generate: true
+
+  # Bundled retro font for the Konami "pixel mode" (works offline).
+  fonts:
+    - family: PressStart2P
+      fonts:
+        - asset: assets/fonts/PressStart2P-Regular.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

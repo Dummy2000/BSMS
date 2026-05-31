@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../../app/app_mode.dart';
 
 /// Hidden Konami-code easter egg.
 ///
@@ -35,7 +36,6 @@ class _KonamiHostState extends State<KonamiHost> {
   _Phase _phase = _Phase.idle;
   final List<_Dir> _swipes = []; // rolling buffer of recent swipe directions
   int _buttonProgress = 0;       // how many of B→A→START pressed correctly
-  static const int _hp = 30;
 
   // Per-pointer drag start (position + time), single-touch only.
   final Map<int, (Offset, DateTime)> _starts = {};
@@ -84,7 +84,9 @@ class _KonamiHostState extends State<KonamiHost> {
     if (label == _buttonOrder[_buttonProgress]) {
       _buttonProgress++;
       if (_buttonProgress >= _buttonOrder.length) {
-        setState(() => _phase = _Phase.activated); // unlock HP bar
+        // Unlock: show HP bar + switch the whole app into retro pixel mode.
+        pixelModeEnabled.value = true;
+        setState(() => _phase = _Phase.activated);
       } else {
         setState(() {}); // advance progress indicator
       }
@@ -106,69 +108,50 @@ class _KonamiHostState extends State<KonamiHost> {
       onPointerDown: _onDown,
       onPointerUp: _onUp,
       onPointerCancel: (e) => _starts.remove(e.pointer),
-      child: Stack(
-        children: [
-          widget.child,
-          if (_phase == _Phase.buttons)
-            _ConsolePad(progress: _buttonProgress, onPress: _press),
-          if (_phase == _Phase.activated)
-            const Positioned(top: 0, left: 0, right: 0, child: _HpBar(hp: _hp)),
-        ],
+      // HP bar + scanlines are driven by the global flag (not local _phase) so
+      // they survive the MaterialApp rebuild that the theme swap triggers.
+      child: ValueListenableBuilder<bool>(
+        valueListenable: pixelModeEnabled,
+        builder: (context, pixelOn, _) {
+          return Stack(
+            children: [
+              widget.child,
+              if (pixelOn)
+                const Positioned.fill(
+                    child: IgnorePointer(child: _Scanlines())),
+              if (_phase == _Phase.buttons)
+                _ConsolePad(progress: _buttonProgress, onPress: _press),
+            ],
+          );
+        },
       ),
     );
   }
 }
 
-// ── Health bar (top edge, decorative) ───────────────────────────────────────
+// ── CRT scanline overlay ─────────────────────────────────────────────────────
 
-class _HpBar extends StatelessWidget {
-  final int hp;
-  const _HpBar({required this.hp});
+class _Scanlines extends StatelessWidget {
+  const _Scanlines();
 
   @override
-  Widget build(BuildContext context) {
-    final topPad = MediaQuery.of(context).padding.top;
-    return IgnorePointer(
-      child: Container(
-        padding: EdgeInsets.fromLTRB(8, topPad + 4, 8, 4),
-        color: Colors.black.withAlpha(160),
-        child: Row(
-          children: [
-            const Text('HP',
-                style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 12)),
-            const SizedBox(width: 6),
-            Expanded(
-              child: Row(
-                children: List.generate(
-                  hp,
-                  (i) => Expanded(
-                    child: Container(
-                      height: 12,
-                      margin: const EdgeInsets.symmetric(horizontal: 0.5),
-                      decoration: BoxDecoration(
-                        color: Colors.red.shade600,
-                        border: Border.all(
-                            color: Colors.red.shade900, width: 0.5),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 6),
-            Text('$hp',
-                style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 12)),
-          ],
-        ),
-      ),
-    );
+  Widget build(BuildContext context) =>
+      CustomPaint(painter: _ScanlinePainter(), size: Size.infinite);
+}
+
+class _ScanlinePainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = Colors.black.withAlpha(28)
+      ..strokeWidth = 1;
+    for (double y = 0; y < size.height; y += 3) {
+      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
+    }
   }
+
+  @override
+  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 // ── Console pad (B / A / START) ──────────────────────────────────────────────

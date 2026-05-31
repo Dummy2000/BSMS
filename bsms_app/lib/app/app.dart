@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'app_mode.dart';
+import 'pixel_theme.dart';
 import '../l10n/app_localizations.dart';
 import '../l10n/l10n_ext.dart';
 import '../data/ble/ecg_ble_service.dart';
@@ -18,54 +20,56 @@ import '../presentation/persons/persons_screen.dart';
 class BsmsApp extends StatelessWidget {
   const BsmsApp({super.key});
 
+  static ThemeData _theme(Brightness b) => ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue, brightness: b),
+        appBarTheme: const AppBarTheme(centerTitle: true, elevation: 2),
+      );
+
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'BSMS ECG Monitor',
-      theme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.blue,
-          brightness: Brightness.light,
-        ),
-        appBarTheme: const AppBarTheme(
-          centerTitle: true,
-          elevation: 2,
-        ),
-      ),
-      darkTheme: ThemeData(
-        useMaterial3: true,
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.blue,
-          brightness: Brightness.dark,
-        ),
-        appBarTheme: const AppBarTheme(
-          centerTitle: true,
-          elevation: 2,
-        ),
-      ),
-      themeMode: ThemeMode.system,
-      localizationsDelegates: const [
-        AppLocalizations.delegate,
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      supportedLocales: AppLocalizations.supportedLocales,
-      // Follow the phone language; fall back to English for any unlisted locale.
-      localeListResolutionCallback: (deviceLocales, supported) {
-        if (deviceLocales != null) {
-          for (final device in deviceLocales) {
-            for (final s in supported) {
-              if (s.languageCode == device.languageCode) return s;
+    // Rebuilds when the Konami easter egg toggles retro "pixel mode".
+    return ValueListenableBuilder<bool>(
+      valueListenable: pixelModeEnabled,
+      builder: (context, pixel, _) {
+        return MaterialApp(
+          title: 'BSMS ECG Monitor',
+          theme: pixel ? pixelTheme(Brightness.light) : _theme(Brightness.light),
+          darkTheme: pixel ? pixelTheme(Brightness.dark) : _theme(Brightness.dark),
+          themeMode: ThemeMode.system,
+          localizationsDelegates: const [
+            AppLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: AppLocalizations.supportedLocales,
+          // Follow the phone language; fall back to English for unlisted locales.
+          localeListResolutionCallback: (deviceLocales, supported) {
+            if (deviceLocales != null) {
+              for (final device in deviceLocales) {
+                for (final s in supported) {
+                  if (s.languageCode == device.languageCode) return s;
+                }
+              }
             }
-          }
-        }
-        return const Locale('en');
+            return const Locale('en');
+          },
+          builder: (context, child) {
+            Widget app = KonamiHost(child: child ?? const SizedBox.shrink());
+            // In pixel mode, clamp text scaling so the chunky font doesn't
+            // compound OS large-text into layout overflows.
+            if (pixel) {
+              app = MediaQuery.withClampedTextScaling(
+                maxScaleFactor: 1.0,
+                child: app,
+              );
+            }
+            return app;
+          },
+          home: const PermissionGate(child: _BsmsHome()),
+        );
       },
-      builder: (context, child) =>
-          KonamiHost(child: child ?? const SizedBox.shrink()),
-      home: const PermissionGate(child: _BsmsHome()),
     );
   }
 }

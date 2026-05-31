@@ -9,6 +9,7 @@ import '../../domain/processing/ecg_filter.dart';
 import '../../domain/processing/r_peak_detector.dart';
 import '../../domain/processing/event_detection_service.dart';
 import '../../domain/processing/hrv_calculator.dart';
+import '../../app/app_mode.dart';
 import '../../l10n/app_localizations.dart';
 import '../../l10n/l10n_ext.dart';
 
@@ -875,15 +876,20 @@ class _Stat extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // The pixel font is much wider — shrink the summary stats in pixel mode so
+    // the top row doesn't overflow.
+    final pixel = pixelModeEnabled.value;
+    final valueSize = pixel ? 9.0 : 16.0;
+    final labelSize = pixel ? 7.0 : 11.0;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         Text(value,
             style: TextStyle(
                 fontWeight: FontWeight.bold,
-                fontSize: 16,
+                fontSize: valueSize,
                 color: color ?? Theme.of(context).colorScheme.onSurface)),
-        Text(label, style: const TextStyle(fontSize: 11)),
+        Text(label, style: TextStyle(fontSize: labelSize)),
       ],
     );
   }

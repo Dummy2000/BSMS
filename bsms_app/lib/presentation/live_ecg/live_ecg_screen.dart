@@ -176,6 +176,13 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
     final isRecording = widget.recordingService.isRecording;
     final visible = List<EcgSample>.from(_liveBuffer);
 
+    // X-axis labelling: leftmost tick shows the wall-clock time, others show the
+    // offset (ms) from that tick. firstTick = first 1 s multiple at/after the
+    // left edge of the visible buffer.
+    const axisIntervalMs = 1000;
+    final windowStartX = visible.isNotEmpty ? visible.first.timestampMs : 0;
+    final firstTick = (windowStartX / axisIntervalMs).ceil() * axisIntervalMs;
+
     return Scaffold(
       appBar: AppBar(
         title: Text(l.liveEcgTitle),
@@ -221,10 +228,15 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
                     )
                   : SfCartesianChart(
                       primaryXAxis: NumericAxis(
-                        interval: 1000,
+                        interval: axisIntervalMs.toDouble(),
                         axisLabelFormatter: (AxisLabelRenderDetails d) {
+                          final v = d.value.round();
+                          if (v > firstTick) {
+                            return ChartAxisLabel('${v - firstTick} ms', d.textStyle);
+                          }
+                          // Leftmost tick → Vienna wall-clock time.
                           const utcOffsetMs = 2 * 3600 * 1000; // Vienna UTC+2
-                          final dayMs = (d.value.toInt() + utcOffsetMs) % 86400000;
+                          final dayMs = (v + utcOffsetMs) % 86400000;
                           final h = dayMs ~/ 3600000;
                           final m = ((dayMs % 3600000) ~/ 60000).toString().padLeft(2, '0');
                           final s = ((dayMs % 60000) ~/ 1000).toString().padLeft(2, '0');

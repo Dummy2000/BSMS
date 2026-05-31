@@ -22,8 +22,11 @@ class ImportedSessionScreen extends StatefulWidget {
 }
 
 class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
-  static const int _minWindowSize     = 250;
-  static const int _maxWindowSize     = 10000;
+  // Zoom steps in samples (×2 ms = duration). Extra steps between 0.5/1/2 s.
+  // 0.5, 0.75, 1, 1.5, 2, 3, 5, 10, 20 s
+  static const List<int> _windowSteps = [
+    250, 375, 500, 750, 1000, 1500, 2500, 5000, 10000,
+  ];
   static const int _defaultWindowSize = 2500;
 
   // ── In-memory session state (SD imports) ─────────────────────────────────
@@ -327,11 +330,39 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
     return bands;
   }
 
+  /// Index of the zoom step nearest to the current window size.
+  int get _stepIndex {
+    int best = 0, bestDiff = 1 << 30;
+    for (int i = 0; i < _windowSteps.length; i++) {
+      final diff = (_windowSteps[i] - _windowSize).abs();
+      if (diff < bestDiff) { bestDiff = diff; best = i; }
+    }
+    return best;
+  }
+
+  /// delta = -1 zooms in (smaller window), +1 zooms out (larger).
+  void _zoom(int delta) {
+    final idx = (_stepIndex + delta).clamp(0, _windowSteps.length - 1);
+    setState(() {
+      _windowSize  = _windowSteps[idx];
+      _windowStart = _windowStart.clamp(0, _maxStart);
+    });
+  }
+
+  /// Window size as a clean seconds label (e.g. "0.75s", "1.5s", "5s").
+  String get _scaleLabel {
+    final s = _windowSize / 500;
+    final str = s == s.roundToDouble() ? s.toStringAsFixed(0) : s.toString();
+    return '${str}s';
+  }
+
   int get _axisIntervalMs {
     final durationMs = _windowSize * 2;
-    if (durationMs <= 5000)  return 1000;
-    if (durationMs <= 10000) return 2000;
-    return 5000;
+    if (durationMs <= 1500)  return 250;   // very close zoom → 250 ms ticks
+    if (durationMs <= 3000)  return 500;   // closer than ~2.5 s → 500 ms ticks
+    if (durationMs <= 6000)  return 1000;  // → 1 s
+    if (durationMs <= 12000) return 2000;  // → 2 s
+    return 4000;                           // 20 s window → 0,4,8,12,16,20 s
   }
 
   int get _maxStart {
@@ -483,6 +514,15 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
       ..._episodeBands(),
     ];
 
+    // X-axis labelling: the leftmost tick shows the wall-clock time, all others
+    // show the offset (ms) from that tick. firstTick = first interval-multiple
+    // at/after the left edge of the visible window (matches Syncfusion's ticks).
+    final axisIntervalMs = _axisIntervalMs;
+    final windowStartX =
+        visible.isNotEmpty ? visible.first.timestampMs - _recordingOrigin : 0;
+    final firstTick =
+        (windowStartX / axisIntervalMs).ceil() * axisIntervalMs;
+
     return Scaffold(
       appBar: AppBar(
         title: Column(
@@ -563,19 +603,18 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                           primaryXAxis: NumericAxis(
                             title: AxisTitle(text: l.axisTime),
                             interval: _axisIntervalMs.toDouble(),
+                            // Shift edge labels inward so the last tick's label
+                            // isn't cropped at the right border.
+                            edgeLabelPlacement: EdgeLabelPlacement.shift,
                             axisLabelFormatter: (AxisLabelRenderDetails d) {
-                              // File-backed X values are recording-relative;
-                              // add the recording's first wall-clock timestamp
-                              // to show real Vienna time. In-memory X values are
-                              // already absolute sample timestamps.
-                              final absMs = _isFileBacked
-                                  ? d.value.toInt() +
-                                      widget.session.firstSampleTimestampMs
-                                  : d.value.toInt();
+                              final v = d.value.round();
+                              // Leftmost tick → wall-clock time; others → offset.
+                              if (v <= firstTick) {
+                                return ChartAxisLabel(
+                                    _eventTimeFmt(v), d.textStyle);
+                              }
                               return ChartAxisLabel(
-                                _formatAsViennaTime(absMs),
-                                d.textStyle,
-                              );
+                                  '${v - firstTick} ms', d.textStyle);
                             },
                             plotBands: plotBands,
                           ),
@@ -693,29 +732,18 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
             icon: const Icon(Icons.zoom_in),
             iconSize: 20,
             tooltip: context.l10n.zoomIn,
-            onPressed: _windowSize > _minWindowSize
-                ? () => setState(() {
-                      _windowSize =
-                          (_windowSize ~/ 2).clamp(_minWindowSize, _maxWindowSize);
-                      _windowStart = _windowStart.clamp(0, _maxStart);
-                    })
-                : null,
+            onPressed: _stepIndex > 0 ? () => _zoom(-1) : null,
+          ),
+          Text(
+            _scaleLabel,
+            style: Theme.of(context).textTheme.bodySmall,
           ),
           IconButton(
             icon: const Icon(Icons.zoom_out),
             iconSize: 20,
             tooltip: context.l10n.zoomOut,
-            onPressed: _windowSize < _maxWindowSize
-                ? () => setState(() {
-                      _windowSize =
-                          (_windowSize * 2).clamp(_minWindowSize, _maxWindowSize);
-                      _windowStart = _windowStart.clamp(0, _maxStart);
-                    })
-                : null,
-          ),
-          Text(
-            '${(_windowSize / 500).toStringAsFixed(1)}s',
-            style: Theme.of(context).textTheme.bodySmall,
+            onPressed:
+                _stepIndex < _windowSteps.length - 1 ? () => _zoom(1) : null,
           ),
           if (_maxStart > 0) ...[
             const SizedBox(width: 4),

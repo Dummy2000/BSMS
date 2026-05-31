@@ -120,12 +120,8 @@ class EcgBleService {
                 print('Optional timestamp sync failed: $e');
               }
 
-              // Attempt to start transmission, but don't stop if it fails
-              try {
-                await startEcgTransmission(deviceId);
-              } catch (e) {
-                print('Optional start command failed: $e');
-              }
+              // Do NOT auto-start: the ESP stays in standby after connecting and
+              // is started explicitly from the app (startMeasurement()).
 
               // Subscribe to notifications - THIS IS THE MOST CRITICAL PART
               await _subscribeToNotifications(deviceId);
@@ -283,6 +279,21 @@ class EcgBleService {
       print('Failed to send stop command: $e');
       throw Exception('Failed to stop ECG transmission: $e');
     }
+  }
+
+  /// Brings the ESP32 out of standby into active measurement (start command).
+  /// No-op if not connected.
+  Future<void> startMeasurement() async {
+    final id = _connectedDeviceId;
+    if (id == null) return;
+    await startEcgTransmission(id);
+  }
+
+  /// Puts the ESP32 back into standby (stop command). No-op if not connected.
+  Future<void> standby() async {
+    final id = _connectedDeviceId;
+    if (id == null) return;
+    await stopEcgTransmission(id);
   }
 
   /// Returns true if currently connected to ECG device and device ID is tracked.

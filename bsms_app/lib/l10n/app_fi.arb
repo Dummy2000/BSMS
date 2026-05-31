@@ -8,6 +8,8 @@
   "liveEcgTitle": "Live-EKG",
   "bleDisconnectTooltip": "Katkaise BLE",
   "bleConnectTooltip": "Yhdistä BLE",
+  "espStart": "Aloita mittaus",
+  "espStandby": "Valmiustila",
   "waitingForData": "Odotetaan dataa …",
   "noBleDevice": "Ei BLE-laitetta yhdistettynä",
   "statusNotConnected": "Ei yhteyttä",

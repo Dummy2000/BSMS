@@ -8,6 +8,8 @@
   "liveEcgTitle": "ライブ心電図",
   "bleDisconnectTooltip": "BLEを切断",
   "bleConnectTooltip": "BLEに接続",
+  "espStart": "計測を開始",
+  "espStandby": "スタンバイ",
   "waitingForData": "データを待機中 …",
   "noBleDevice": "BLEデバイスが未接続です",
   "statusNotConnected": "未接続",

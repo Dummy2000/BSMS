@@ -8,6 +8,8 @@
   "liveEcgTitle": "ECG en vivo",
   "bleDisconnectTooltip": "Desconectar BLE",
   "bleConnectTooltip": "Conectar BLE",
+  "espStart": "Iniciar medición",
+  "espStandby": "Reposo",
   "waitingForData": "Esperando datos …",
   "noBleDevice": "Ningún dispositivo BLE conectado",
   "statusNotConnected": "No conectado",

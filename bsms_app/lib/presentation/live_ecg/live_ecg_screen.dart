@@ -49,6 +49,7 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
   LiveStatus _status = LiveStatus.notConnected;
   int _lastPacketHr = 0; // HR reported by ESP firmware, shown outside recording
   int _leadOffFlags = 0; // bit0=LO+, bit1=LO- ; 0 = both electrodes attached
+  bool _espActive = false; // ESP measuring (true) vs. standby (false)
 
   RecordingStatus? _recStatus;
   StreamSubscription<EcgPacket>? _packetSub;
@@ -62,6 +63,9 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
       setState(() {
         _bleConnected = connected;
         _status = connected ? LiveStatus.connected : LiveStatus.connectionLost;
+        // The ESP stays in standby after connecting — it is started explicitly
+        // via the power button. So it is never active just from connecting.
+        _espActive = false;
         if (!connected) {
           // Clear stale samples so the chart starts clean on reconnect.
           _liveBuffer.clear();
@@ -122,7 +126,27 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
   Future<void> _stopBle() async {
     if (widget.recordingService.isRecording) await _stopRecording();
     await widget.bleService.stop();
-    setState(() { _bleConnected = false; _status = LiveStatus.disconnected; });
+    setState(() {
+      _bleConnected = false;
+      _status = LiveStatus.disconnected;
+      _espActive = false;
+    });
+  }
+
+  /// Toggle the ESP between active measurement and standby.
+  Future<void> _toggleEsp() async {
+    if (_espActive) {
+      // Going to standby — stop any recording first (no data will follow).
+      if (widget.recordingService.isRecording) await _stopRecording();
+      await widget.bleService.standby();
+      setState(() => _espActive = false);
+    } else {
+      await widget.bleService.startMeasurement();
+      setState(() {
+        _espActive = true;
+        _liveBuffer.clear(); // clean chart on resume
+      });
+    }
   }
 
   // ── Recording ─────────────────────────────────────────────────────────────
@@ -187,6 +211,15 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
       appBar: AppBar(
         title: Text(l.liveEcgTitle),
         actions: [
+          // ESP start / standby (only meaningful while connected)
+          if (_bleConnected)
+            IconButton(
+              icon: Icon(_espActive
+                  ? Icons.pause_circle_outline
+                  : Icons.play_circle_outline),
+              tooltip: _espActive ? l.espStandby : l.espStart,
+              onPressed: _toggleEsp,
+            ),
           // BLE connect / disconnect
           _bleConnected
               ? IconButton(
@@ -215,14 +248,23 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
           // Lead-off warning banner
           if (_leadOffFlags != 0) _LeadOffBanner(flags: _leadOffFlags),
 
-          // Live ECG chart
+          // Live ECG chart / standby screen
           Expanded(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(8, 8, 8, 0),
-              child: visible.isEmpty
+              child: !_bleConnected
                   ? Center(
                       child: Text(
-                        _bleConnected ? l.waitingForData : l.noBleDevice,
+                        l.noBleDevice,
+                        style: Theme.of(context).textTheme.bodyMedium,
+                      ),
+                    )
+                  : !_espActive
+                      ? _StandbyView(onStart: _toggleEsp)
+                  : visible.isEmpty
+                  ? Center(
+                      child: Text(
+                        l.waitingForData,
                         style: Theme.of(context).textTheme.bodyMedium,
                       ),
                     )
@@ -284,8 +326,56 @@ class _LiveEcgScreenState extends State<LiveEcgScreen> {
                     ),
                     icon: const Icon(Icons.fiber_manual_record),
                     label: Text(l.recordStart),
-                    onPressed: _bleConnected ? _startRecording : null,
+                    onPressed:
+                        _bleConnected && _espActive ? _startRecording : null,
                   ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Standby screen (ESP connected but not measuring) ────────────────────────────
+
+class _StandbyView extends StatelessWidget {
+  final VoidCallback onStart;
+  const _StandbyView({required this.onStart});
+
+  @override
+  Widget build(BuildContext context) {
+    final l = context.l10n;
+    final color = Theme.of(context).colorScheme.primary;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Big tappable power symbol → starts the measurement.
+          InkWell(
+            onTap: onStart,
+            customBorder: const CircleBorder(),
+            child: Container(
+              width: 120,
+              height: 120,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: color, width: 4),
+              ),
+              child: Icon(Icons.power_settings_new, size: 64, color: color),
+            ),
+          ),
+          const SizedBox(height: 20),
+          Text(
+            l.espStandby,
+            style: Theme.of(context)
+                .textTheme
+                .titleLarge
+                ?.copyWith(fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            l.espStart,
+            style: Theme.of(context).textTheme.bodyMedium,
           ),
         ],
       ),

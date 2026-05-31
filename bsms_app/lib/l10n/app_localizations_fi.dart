@@ -27,6 +27,12 @@ class AppLocalizationsFi extends AppLocalizations {
   String get bleConnectTooltip => 'Yhdistä BLE';
 
   @override
+  String get espStart => 'Aloita mittaus';
+
+  @override
+  String get espStandby => 'Valmiustila';
+
+  @override
   String get waitingForData => 'Odotetaan dataa …';
 
   @override

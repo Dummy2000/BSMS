@@ -27,6 +27,12 @@ class AppLocalizationsJa extends AppLocalizations {
   String get bleConnectTooltip => 'BLEに接続';
 
   @override
+  String get espStart => '計測を開始';
+
+  @override
+  String get espStandby => 'スタンバイ';
+
+  @override
   String get waitingForData => 'データを待機中 …';
 
   @override

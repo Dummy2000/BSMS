@@ -140,6 +140,18 @@ abstract class AppLocalizations {
   /// **'Connect BLE'**
   String get bleConnectTooltip;
 
+  /// No description provided for @espStart.
+  ///
+  /// In en, this message translates to:
+  /// **'Start measurement'**
+  String get espStart;
+
+  /// No description provided for @espStandby.
+  ///
+  /// In en, this message translates to:
+  /// **'Standby'**
+  String get espStandby;
+
   /// No description provided for @waitingForData.
   ///
   /// In en, this message translates to:

@@ -8,6 +8,8 @@
   "liveEcgTitle": "Live EKG",
   "bleDisconnectTooltip": "BLE trennen",
   "bleConnectTooltip": "BLE verbinden",
+  "espStart": "Messung starten",
+  "espStandby": "Standby",
   "waitingForData": "Warte auf Daten …",
   "noBleDevice": "Kein BLE-Gerät verbunden",
   "statusNotConnected": "Nicht verbunden",

@@ -9,6 +9,7 @@ import '../data/storage/database_helper.dart';
 import '../data/storage/imported_session_repository.dart';
 import '../data/storage/person_repository.dart';
 import '../data/storage/session_storage_service.dart';
+import '../presentation/easter_egg/konami_host.dart';
 import '../presentation/history/history_screen.dart';
 import '../presentation/live_ecg/live_ecg_screen.dart';
 import '../presentation/permissions/permission_gate.dart';
@@ -62,6 +63,8 @@ class BsmsApp extends StatelessWidget {
         }
         return const Locale('en');
       },
+      builder: (context, child) =>
+          KonamiHost(child: child ?? const SizedBox.shrink()),
       home: const PermissionGate(child: _BsmsHome()),
     );
   }

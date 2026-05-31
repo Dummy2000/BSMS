@@ -40,10 +40,11 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
   int  _totalSamples   = 0;
 
   // ── Shared ────────────────────────────────────────────────────────────────
-  /// Timestamp (ms) of the very first sample, used to convert absolute
-  /// sample timestamps to recording-relative X-axis values.
-  /// 0 for file-backed (SessionReader already returns relative timestamps).
-  late final int _recordingOrigin;
+  /// X-axis origin = timestamp (ms) of the left edge of the currently visible
+  /// window. The chart plots data relative to this so the axis labels stay
+  /// pinned at 0, 500, 1000 … and don't slide when the window is panned.
+  /// Recomputed at the start of every [build].
+  int _viewOrigin = 0;
   late final List<DetectedEvent> _events;
 
   /// Effective HR data: session.hrData for SD imports, peaks→bpm for BLE.
@@ -78,7 +79,6 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
       _filtered        = const [];
       _rPeaks          = const [];
       _totalSamples    = session.totalSampleCount;
-      _recordingOrigin = 0; // SessionReader returns timestamps relative to recording start
       _effectiveHrData =
           EventDetectionService.hrFromPeakIndices(session.rPeakIndices);
       _events = EventDetectionService.applyLeadOff(
@@ -91,7 +91,6 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
           session.rPeakIndices.map((i) => i * 2).toList());
     } else {
       _totalSamples    = 0;
-      _recordingOrigin = 0; // raw Unix epoch ms used directly as X values
       _filtered        = EcgFilter.bandpass(session.samples);
       _rPeaks       = RPeakDetector.detect(_filtered);
 
@@ -202,12 +201,25 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
   List<HrDataPoint> _visibleHrPoints(int originMs) {
     if (!_showHr || _effectiveHrData.isEmpty) return const [];
     final windowEndMs = originMs + _windowSize * 2;
-    return _effectiveHrData
-        .where((p) =>
-            p.bpm > 0 &&
-            p.timestampMs >= originMs &&
-            p.timestampMs <= windowEndMs)
-        .toList();
+    final pts = _effectiveHrData; // ascending by timestamp
+
+    // Inclusive index bounds of the points inside the window.
+    int lo = 0;
+    while (lo < pts.length && pts[lo].timestampMs < originMs) {
+      lo++;
+    }
+    int hi = pts.length - 1;
+    while (hi >= 0 && pts[hi].timestampMs > windowEndMs) {
+      hi--;
+    }
+
+    // Extend by one point on each side so the connecting line spans the full
+    // width (it gets clipped at the plot edges). This also keeps the line
+    // continuous while panning instead of jumping when a point exits the window.
+    final start = (lo - 1) < 0 ? 0 : lo - 1;
+    final end   = (hi + 1) >= pts.length ? pts.length - 1 : hi + 1;
+    if (start > end) return const [];
+    return pts.sublist(start, end + 1).where((p) => p.bpm > 0).toList();
   }
 
   List<PlotBand> _leadOffBands() {
@@ -230,8 +242,8 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
         .map((iv) {
           final end = iv.endMs == -1 ? recEnd : iv.endMs;
           return PlotBand(
-            start: (iv.startMs - _recordingOrigin).toDouble(),
-            end:   (end        - _recordingOrigin).toDouble(),
+            start: (iv.startMs - _viewOrigin).toDouble(),
+            end:   (end        - _viewOrigin).toDouble(),
             color: Colors.red.withAlpha(45),
             borderColor: Colors.red.withAlpha(80),
             borderWidth: 1,
@@ -257,8 +269,8 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
         .map((iv) {
           final end = iv.endMs == -1 ? winEnd : iv.endMs;
           return PlotBand(
-            start: (iv.startMs - _recordingOrigin).toDouble(),
-            end:   (end        - _recordingOrigin).toDouble(),
+            start: (iv.startMs - _viewOrigin).toDouble(),
+            end:   (end        - _viewOrigin).toDouble(),
             color: Colors.red.withAlpha(100),
             borderColor: Colors.red,
             borderWidth: 1.5,
@@ -308,13 +320,13 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
         continue;
       }
 
-      final start = e.timestampMs - _recordingOrigin;
+      final start = e.timestampMs - _viewOrigin;
       // Use actual episode duration; fall back to 1 s for onset-only events.
       final end = (e.durationMs != null && e.durationMs! > 0)
           ? start + e.durationMs!
           : start + 1000;
 
-      if (end < winStart - _recordingOrigin || start > winEnd - _recordingOrigin) {
+      if (end < winStart - _viewOrigin || start > winEnd - _viewOrigin) {
         continue;
       }
 
@@ -505,6 +517,18 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
     final visible   = _visibleSamples;
     // used only to filter HR points to the visible window
     final hrOrigin  = visible.isNotEmpty ? visible.first.timestampMs : 0;
+    // Use absolute (stable) x values for ALL series so the waveform line and the
+    // overlay markers (R-peaks, HR dots) share the exact same time→pixel
+    // transform. Rebasing per frame shifted every point's x each pan, which made
+    // the markers drift / leave stale dots. Stable round labels are instead
+    // achieved by anchoring the axis minimum to the window's left edge:
+    // Syncfusion places ticks at minimum, minimum+interval, … so the offset from
+    // the minimum is always 0, 500, 1000 …
+    _viewOrigin = 0; // data plotted at absolute timestamps
+    final int axisMinMs = visible.isNotEmpty ? visible.first.timestampMs : 0;
+    final double? axisMinD = visible.isNotEmpty ? axisMinMs.toDouble() : null;
+    final double? axisMaxD =
+        visible.isNotEmpty ? visible.last.timestampMs.toDouble() : null;
     final hasHr     = _effectiveHrData.isNotEmpty;
     final hasLo     = session.leadOffIntervals.isNotEmpty;
     final hasDc     = session.disconnectIntervals.isNotEmpty;
@@ -513,15 +537,6 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
       ..._disconnectBands(),
       ..._episodeBands(),
     ];
-
-    // X-axis labelling: the leftmost tick shows the wall-clock time, all others
-    // show the offset (ms) from that tick. firstTick = first interval-multiple
-    // at/after the left edge of the visible window (matches Syncfusion's ticks).
-    final axisIntervalMs = _axisIntervalMs;
-    final windowStartX =
-        visible.isNotEmpty ? visible.first.timestampMs - _recordingOrigin : 0;
-    final firstTick =
-        (windowStartX / axisIntervalMs).ceil() * axisIntervalMs;
 
     return Scaffold(
       appBar: AppBar(
@@ -601,25 +616,35 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                         },
                         child: SfCartesianChart(
                           primaryXAxis: NumericAxis(
-                            title: AxisTitle(text: l.axisTime),
+                            title: AxisTitle(text: '${l.axisTime} (ms)'),
                             interval: _axisIntervalMs.toDouble(),
-                            // Shift edge labels inward so the last tick's label
-                            // isn't cropped at the right border.
-                            edgeLabelPlacement: EdgeLabelPlacement.shift,
+                            minimum: axisMinD,
+                            maximum: axisMaxD,
+                            // Right-align each label (incl. the start-time label)
+                            // to its tick gridline; no edge shifting so the
+                            // leftmost label also stays right-aligned.
+                            labelAlignment: LabelAlignment.end,
                             axisLabelFormatter: (AxisLabelRenderDetails d) {
-                              final v = d.value.round();
-                              // Leftmost tick → wall-clock time; others → offset.
-                              if (v <= firstTick) {
+                              // Ticks run from the axis minimum (window's left
+                              // edge) in steps of the interval → offset is always
+                              // 0, 500, 1000 … (stable while panning). The
+                              // leftmost (offset 0) shows the wall-clock time.
+                              final off = d.value.round() - axisMinMs;
+                              if (off <= 0) {
                                 return ChartAxisLabel(
-                                    _eventTimeFmt(v), d.textStyle);
+                                    _eventTimeFmt(axisMinMs), d.textStyle);
                               }
-                              return ChartAxisLabel(
-                                  '${v - firstTick} ms', d.textStyle);
+                              return ChartAxisLabel('$off', d.textStyle);
                             },
                             plotBands: plotBands,
                           ),
-                          primaryYAxis:
-                              NumericAxis(title: AxisTitle(text: l.axisAdc)),
+                          primaryYAxis: NumericAxis(
+                            title: AxisTitle(text: l.axisAdc),
+                            // Keep labels on the left, but raise them so each
+                            // number sits on its gridline instead of being
+                            // vertically centred on it.
+                            labelAlignment: LabelAlignment.end,
+                          ),
                           axes: _showHr && hasHr
                               ? <ChartAxis>[
                                   NumericAxis(
@@ -636,7 +661,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                             LineSeries<EcgSample, int>(
                               dataSource: visible,
                               xValueMapper: (s, _) =>
-                                  s.timestampMs - _recordingOrigin,
+                                  s.timestampMs - _viewOrigin,
                               yValueMapper: (s, _) => s.value,
                               animationDuration: 0,
                               width: 1.2,
@@ -648,7 +673,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                               ScatterSeries<EcgSample, int>(
                                 dataSource: _visibleRPeaks,
                                 xValueMapper: (s, _) =>
-                                    s.timestampMs - _recordingOrigin,
+                                    s.timestampMs - _viewOrigin,
                                 yValueMapper: (s, _) => s.value,
                                 markerSettings: const MarkerSettings(
                                   isVisible: true,
@@ -663,7 +688,7 @@ class _ImportedSessionScreenState extends State<ImportedSessionScreen> {
                               LineSeries<HrDataPoint, int>(
                                 dataSource: _visibleHrPoints(hrOrigin),
                                 xValueMapper: (p, _) =>
-                                    p.timestampMs - _recordingOrigin,
+                                    p.timestampMs - _viewOrigin,
                                 yValueMapper: (p, _) => p.bpm,
                                 yAxisName: 'hrAxis',
                                 animationDuration: 0,

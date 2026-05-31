@@ -27,6 +27,12 @@ class AppLocalizationsEn extends AppLocalizations {
   String get bleConnectTooltip => 'Connect BLE';
 
   @override
+  String get espStart => 'Start measurement';
+
+  @override
+  String get espStandby => 'Standby';
+
+  @override
   String get waitingForData => 'Waiting for data …';
 
   @override

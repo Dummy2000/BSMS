@@ -1,310 +1,381 @@
-# macOS 向け ECG アプリ — コード・設定ファイル一覧
+# BSMS ECG Monitor — Developer Setup Guide
 
-プロジェクト内の macOS 固有ファイルはすべて以下のパスに格納されています。
-
-```
-BSMS-main-2/bsms_app/macos/
-```
+**Biomedical Signal Monitoring System**
+A cross-platform Flutter app that connects to an ESP32 over BLE and displays real-time ECG waveforms.
 
 ---
 
-## ファイル構成
+## What This App Does
 
-```
-macos/
-├── Podfile                        ← CocoaPods 依存関係定義
-├── Podfile.lock                   ← 依存バージョン固定
-├── Flutter/
-│   ├── Flutter-Debug.xcconfig
-│   ├── Flutter-Release.xcconfig
-│   └── GeneratedPluginRegistrant.swift
-├── Runner.xcodeproj/              ← Xcode プロジェクト設定
-├── Runner.xcworkspace/            ← Xcode ワークスペース（CocoaPods 込み）
-└── Runner/
-    ├── Info.plist                 ← Bluetooth 権限説明文 ★
-    ├── DebugProfile.entitlements  ← デバッグ時の権限設定 ★
-    ├── Release.entitlements       ← リリース時の権限設定 ★
-    ├── AppDelegate.swift          ← アプリ起動エントリポイント
-    ├── MainFlutterWindow.swift    ← Flutter ウィンドウ初期化
-    ├── Assets.xcassets/           ← アプリアイコン
-    ├── Base.lproj/MainMenu.xib    ← メニューバー定義
-    └── Configs/
-        ├── AppInfo.xcconfig       ← Bundle ID・アプリ名 ★
-        ├── Debug.xcconfig
-        ├── Release.xcconfig
-        └── Warnings.xcconfig
-```
-
----
-
-## 重要ファイルの内容
-
-### 1. Info.plist — Bluetooth 権限説明文
-
-**パス:** `macos/Runner/Info.plist`
-
-Bluetooth を使用するために macOS が要求する権限説明文を追加しています。
-この文字列はシステムのダイアログに表示されます。
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>$(DEVELOPMENT_LANGUAGE)</string>
-    <key>CFBundleExecutable</key>
-    <string>$(EXECUTABLE_NAME)</string>
-    <key>CFBundleIdentifier</key>
-    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>$(PRODUCT_NAME)</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>$(FLUTTER_BUILD_NAME)</string>
-    <key>CFBundleVersion</key>
-    <string>$(FLUTTER_BUILD_NUMBER)</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
-    <key>NSHumanReadableCopyright</key>
-    <string>$(PRODUCT_COPYRIGHT)</string>
-    <key>NSMainNibFile</key>
-    <string>MainMenu</string>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-
-    <!-- ★ Bluetooth 権限（今回追加） -->
-    <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>This app needs Bluetooth access to connect to ECG monitoring devices.</string>
-</dict>
-</plist>
-```
-
----
-
-### 2. DebugProfile.entitlements — デバッグ用権限
-
-**パス:** `macos/Runner/DebugProfile.entitlements`
-
-macOS の App Sandbox 内で Bluetooth を使うための権限設定です。
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.app-sandbox</key>
-    <true/>
-    <key>com.apple.security.cs.allow-jit</key>
-    <true/>
-    <key>com.apple.security.network.server</key>
-    <true/>
-
-    <!-- ★ Bluetooth 権限 -->
-    <key>com.apple.security.device.bluetooth</key>
-    <true/>
-</dict>
-</plist>
-```
-
----
-
-### 3. Release.entitlements — リリース用権限
-
-**パス:** `macos/Runner/Release.entitlements`
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.app-sandbox</key>
-    <true/>
-
-    <!-- ★ Bluetooth 権限 -->
-    <key>com.apple.security.device.bluetooth</key>
-    <true/>
-</dict>
-</plist>
-```
-
----
-
-### 4. AppDelegate.swift — アプリ起動エントリポイント
-
-**パス:** `macos/Runner/AppDelegate.swift`
-
-Flutter の macOS テンプレートそのままです。最後のウィンドウを閉じたときにアプリを終了します。
-
-```swift
-import Cocoa
-import FlutterMacOS
-
-@main
-class AppDelegate: FlutterAppDelegate {
-    override func applicationShouldTerminateAfterLastWindowClosed(
-        _ sender: NSApplication
-    ) -> Bool {
-        return true
-    }
-
-    override func applicationSupportsSecureRestorableState(
-        _ app: NSApplication
-    ) -> Bool {
-        return true
-    }
-}
-```
-
----
-
-### 5. MainFlutterWindow.swift — Flutter ウィンドウ初期化
-
-**パス:** `macos/Runner/MainFlutterWindow.swift`
-
-Flutter の ViewController を macOS ウィンドウに埋め込み、プラグインを登録します。
-
-```swift
-import Cocoa
-import FlutterMacOS
-
-class MainFlutterWindow: NSWindow {
-    override func awakeFromNib() {
-        let flutterViewController = FlutterViewController()
-        let windowFrame = self.frame
-        self.contentViewController = flutterViewController
-        self.setFrame(windowFrame, display: true)
-
-        RegisterGeneratedPlugins(registry: flutterViewController)
-
-        super.awakeFromNib()
-    }
-}
-```
-
----
-
-### 6. Configs/AppInfo.xcconfig — アプリ基本情報
-
-**パス:** `macos/Runner/Configs/AppInfo.xcconfig`
-
-Bundle ID やアプリ名を変更する場合はここを編集します。
-
-```
-PRODUCT_NAME = bsms_app
-PRODUCT_BUNDLE_IDENTIFIER = com.example.bsmsApp
-PRODUCT_COPYRIGHT = Copyright © 2026 com.example. All rights reserved.
-```
-
----
-
-### 7. Podfile — CocoaPods 依存関係
-
-**パス:** `macos/Podfile`
-
-macOS の BLE プラグイン（`reactive_ble_mobile`）と SharedPreferences を CocoaPods で管理します。
-
-```ruby
-platform :osx, '10.15'
-
-ENV['COCOAPODS_DISABLE_STATS'] = 'true'
-
-project 'Runner', {
-  'Debug'   => :debug,
-  'Profile' => :release,
-  'Release' => :release,
-}
-
-def flutter_root
-  generated_xcode_build_settings_path = File.expand_path(
-    File.join('..', 'Flutter', 'ephemeral', 'Flutter-Generated.xcconfig'), __FILE__
-  )
-  unless File.exist?(generated_xcode_build_settings_path)
-    raise "#{generated_xcode_build_settings_path} must exist. " \
-          "Run 'flutter pub get' first."
-  end
-  File.foreach(generated_xcode_build_settings_path) do |line|
-    matches = line.match(/FLUTTER_ROOT\=(.*)/)
-    return matches[1].strip if matches
-  end
-  raise "FLUTTER_ROOT not found. Try deleting Flutter-Generated.xcconfig, " \
-        "then run 'flutter pub get'."
-end
-
-require File.expand_path(
-  File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root
-)
-
-flutter_macos_podfile_setup
-
-target 'Runner' do
-  use_frameworks!
-  flutter_install_all_macos_pods File.dirname(File.realpath(__FILE__))
-  target 'RunnerTests' do
-    inherit! :search_paths
-  end
-end
-
-post_install do |installer|
-  installer.pods_project.targets.each do |target|
-    flutter_additional_macos_build_settings(target)
-  end
-end
-```
-
----
-
-### 8. Podfile.lock — 依存バージョン固定
-
-**パス:** `macos/Podfile.lock`
-
-使用している CocoaPods パッケージのバージョン：
-
-| パッケージ | バージョン |
+| Feature | Details |
 |---|---|
-| FlutterMacOS | 1.0.0 |
-| reactive_ble_mobile | 0.0.1 |
-| shared_preferences_foundation | 0.0.1 |
-| Protobuf | 3.29.6 |
-| SwiftProtobuf | 1.38.0 |
+| Real-time ECG display | Live waveform from ESP32 at 500 Hz |
+| Signal modes | Raw / Filtered (IIR bandpass) / R-Peak overlay |
+| Heart rate | BPM calculated from R-R intervals |
+| Event detection | Tachycardia (>100 BPM), Bradycardia (<50 BPM), Arrhythmia |
+| BLE scan | Auto-detects ESP32 by device name |
+| CSV export | Save recording and share via AirDrop / email |
+| Demo mode | Works without hardware — simulated ECG waveform |
+| Languages | English / Japanese / German (switchable in Settings) |
+| Platforms | iOS · Android · macOS |
 
 ---
 
-## macOS ビルド手順
+## Repository Layout
+
+```
+BSMS-main-2/
+├── bsms_app/                    ← Flutter app (this guide focuses here)
+│   ├── lib/
+│   │   ├── app/                 ← App entry, settings, routing
+│   │   ├── data/
+│   │   │   ├── ble/             ← BLE scanner, packet parser, demo generator
+│   │   │   ├── buffer/          ← Ring buffer (2000-sample circular FIFO)
+│   │   │   └── storage/         ← CSV save, session history
+│   │   ├── domain/
+│   │   │   └── processing/      ← EcgFilter, RPeakDetector, EventDetectionService
+│   │   ├── l10n/                ← Localization (EN / JA / DE)
+│   │   └── presentation/
+│   │       ├── live_ecg/        ← Main ECG screen + ViewModel
+│   │       ├── ble_scan/        ← BLE device scanner screen
+│   │       ├── history/         ← Session list & detail
+│   │       └── settings/        ← App settings screen
+│   ├── test/                    ← 69 unit + integration tests
+│   ├── android/                 ← Android BLE permissions
+│   ├── ios/                     ← iOS BLE permissions + Info.plist
+│   └── macos/                   ← macOS BLE permissions + Entitlements
+├── Integrated ESP32 Firmware    ← ESP32 source code
+├── ESP32_Blink/                 ← PlatformIO project
+└── Offline ECG Filter Script (Python)
+```
+
+---
+
+## Requirements
+
+| Tool | Minimum version | Where to get |
+|---|---|---|
+| Flutter SDK | 3.32 or later | https://docs.flutter.dev/get-started/install |
+| Dart SDK | 3.11.5 (bundled with Flutter) | — |
+| Xcode | 15 or later (macOS / iOS only) | Mac App Store |
+| CocoaPods | 1.16 or later | `sudo gem install cocoapods` |
+| Android Studio | Ladybug or later (Android only) | https://developer.android.com/studio |
+| VS Code (optional) | Any | With Flutter extension |
+
+Check your Flutter setup with:
 
 ```bash
-# 1. プロジェクトディレクトリへ移動
-cd BSMS-main-2/bsms_app
+flutter doctor
+```
 
-# 2. 依存関係インストール
-flutter pub get
+All items should show a green checkmark before proceeding.
 
-# 3. CocoaPods インストール（初回 or Podfile 変更後）
-cd macos && pod install && cd ..
+---
 
-# 4. macOS アプリとして実行
-flutter run -d macos
+## Cloning the Repository
 
-# 5. リリースビルド
-flutter build macos
-# → build/macos/Build/Products/Release/bsms_app.app
+```bash
+git clone https://github.com/kamesky1202-debug/ECG-Mobile-Project.git
+cd ECG-Mobile-Project/bsms_app
 ```
 
 ---
 
-## macOS 固有の設定ポイント（今回追加・確認した内容）
+## First-Time Setup
 
-| 設定 | ファイル | 内容 |
+```bash
+# Inside bsms_app/
+
+# 1. Download all Dart packages
+flutter pub get
+
+# 2. Regenerate localization files (English / Japanese / German)
+flutter gen-l10n
+
+# 3. Verify everything compiles with zero warnings
+flutter analyze
+```
+
+Expected output of `flutter analyze`:
+```
+No issues found!
+```
+
+---
+
+## Running the App
+
+### macOS (recommended for development)
+
+```bash
+flutter run -d macos
+```
+
+> No physical ECG hardware needed — tap **Start Demo** in the app to see a simulated waveform.
+
+### iOS (requires iPhone connected via USB)
+
+```bash
+flutter run -d <your-device-id>
+```
+
+First time on a physical iPhone:
+1. Open `ios/Runner.xcworkspace` in Xcode
+2. Go to **Signing & Capabilities** → set your Apple ID team
+3. Change **Bundle Identifier** to something unique (e.g. `com.yourname.bsmsEcg`)
+4. Trust the developer certificate on your iPhone: **Settings → General → VPN & Device Management**
+
+### Android (requires Android phone connected via USB or emulator)
+
+```bash
+flutter run -d <your-device-id>
+```
+
+Enable Developer Mode on the phone: **Settings → About Phone → tap Build Number 7 times**
+
+---
+
+## macOS — Bluetooth Permission Setup (Already Done)
+
+macOS requires two levels of Bluetooth permission. Both are already configured in this repo — no changes needed unless you modify the Bundle ID.
+
+### Level 1 — Info.plist (usage description shown to the user)
+
+**File:** `macos/Runner/Info.plist`
+
+```xml
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>This app needs Bluetooth access to connect to ECG monitoring devices.</string>
+```
+
+### Level 2 — Entitlements (App Sandbox permission)
+
+**File:** `macos/Runner/DebugProfile.entitlements`  (used when running via `flutter run`)
+
+```xml
+<key>com.apple.security.device.bluetooth</key>
+<true/>
+```
+
+**File:** `macos/Runner/Release.entitlements`  (used when running `flutter build macos`)
+
+```xml
+<key>com.apple.security.device.bluetooth</key>
+<true/>
+```
+
+> **Why both files?** macOS sandboxes every app by default. `Info.plist` provides the human-readable reason shown in the system dialog; the Entitlements files grant the actual OS-level permission. Missing either one will cause BLE scanning to silently fail.
+
+---
+
+## iOS — Bluetooth Permission Setup (Already Done)
+
+**File:** `ios/Runner/Info.plist`
+
+```xml
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>This app needs Bluetooth access to connect to ECG monitoring devices.</string>
+
+<key>NSBluetoothPeripheralUsageDescription</key>
+<string>This app needs Bluetooth access to connect to ECG monitoring devices.</string>
+```
+
+---
+
+## Android — Bluetooth Permission Setup (Already Done)
+
+**File:** `android/app/src/main/AndroidManifest.xml`
+
+Permissions already declared:
+- `BLUETOOTH_SCAN` (Android 12+, `neverForLocation`)
+- `BLUETOOTH_CONNECT` (Android 12+)
+- `BLUETOOTH` / `BLUETOOTH_ADMIN` (Android 11 and below)
+- `ACCESS_FINE_LOCATION` (required for BLE on Android ≤ 11)
+
+---
+
+## Key Packages
+
+| Package | Purpose |
+|---|---|
+| `flutter_reactive_ble ^5.5.0` | BLE scanning and GATT characteristic subscription |
+| `syncfusion_flutter_charts ^33.2.6` | Real-time ECG waveform chart (FastLineSeries) |
+| `shared_preferences ^2.3.0` | Persist settings (device name, thresholds, language) |
+| `path_provider ^2.0.15` | Get platform-correct Documents directory for CSV files |
+| `share_plus ^10.1.4` | Native Share Sheet (AirDrop, email, etc.) |
+| `flutter_localizations` | Built-in Flutter i18n support |
+
+---
+
+## Signal Processing Architecture
+
+```
+ESP32 (BLE)
+    │  47-byte packet every 40 ms
+    │  [Uint32 timestamp | Uint32 heart_rate | 20 × Uint16 ADC samples]
+    ▼
+EcgPacketParser          → decodes binary packet → List<EcgSample>
+    ▼
+EcgRingBuffer            → circular FIFO, capacity 2000 samples
+    ▼
+EcgFilter                → IIR bandpass 0.5–40 Hz @ 500 Hz sample rate
+    ▼
+RPeakDetector            → Pan-Tompkins algorithm → R-peak flags + BPM
+    ▼
+EventDetectionService    → tachycardia / bradycardia / arrhythmia alerts
+    ▼
+LiveEcgViewModel         → exposes chartSamples + peakIndices to UI
+    ▼
+LiveEcgScreen            → FastLineSeries chart + ScatterSeries R-peak markers
+```
+
+### Signal Display Modes
+
+Switch modes using the segmented control at the top of the ECG screen:
+
+| Mode | What is shown |
+|---|---|
+| **Raw** | Direct ADC values from ESP32 (0–4095) |
+| **Filtered** | After IIR bandpass filter — cleaner baseline |
+| **R-Peaks** | Filtered signal + red inverted-triangle markers at each R-peak |
+
+---
+
+## BLE Packet Format
+
+The ESP32 firmware sends one packet every 40 ms (500 Hz effective sampling rate):
+
+```
+Offset  Size   Type      Field
+──────  ────   ────────  ──────────────────────────────────
+0       4      Uint32    Device uptime in milliseconds
+4       4      Uint32    Heart rate from ESP32 hardware
+8–46    20×2   Uint16[]  20 ADC samples (little-endian, 0–4095)
+```
+
+Total: **47 bytes per packet**, 20 samples × 25 packets/s = **500 samples/s**
+
+> The timestamp is device uptime (e.g. 5000 = 5 seconds since boot), **not** a Unix timestamp. The app ring buffer handles this correctly.
+
+---
+
+## ESP32 Connection Flow
+
+1. Tap **BLE Connect** on the ECG screen
+2. The BLE scan screen opens and searches for nearby devices
+3. Devices whose name contains `"ECG"` or `"Holter"` are highlighted automatically
+4. Tap the ESP32 device to connect
+5. The app subscribes to the GATT notification characteristic and starts receiving data
+6. Tap **Disconnect** to end the session
+
+**Default device name filter:** `"ECG"` (configurable in Settings)
+
+---
+
+## Settings
+
+All settings are saved automatically via `SharedPreferences`.
+
+| Setting | Default | Description |
 |---|---|---|
-| Bluetooth 権限説明文 | `Info.plist` | `NSBluetoothAlwaysUsageDescription` を追加 |
-| Sandbox 内 BLE 権限 | `DebugProfile.entitlements` | `com.apple.security.device.bluetooth = true` を追加 |
-| Sandbox 内 BLE 権限 | `Release.entitlements` | `com.apple.security.device.bluetooth = true` を追加 |
-| 最低 macOS バージョン | `Podfile` | `platform :osx, '10.15'`（Catalina 以降） |
+| Device name | `"ECG"` | Partial match filter for BLE scan |
+| Tachycardia threshold | 100 BPM | Alert shown above this value |
+| Bradycardia threshold | 50 BPM | Alert shown below this value |
+| Arrhythmia threshold | 50 ms | RR standard deviation limit |
+| Language | System | English / Japanese / German |
 
-> **注意:** macOS では App Sandbox が有効なため、Entitlements に Bluetooth 権限を明示しないと BLE スキャンが動作しません。iOS と違い Info.plist だけでは不十分です。
+---
+
+## Running Tests
+
+```bash
+cd bsms_app
+
+# Run all tests (69 total)
+flutter test
+
+# Run a specific test file
+flutter test test/domain/ecg_filter_test.dart
+```
+
+Test coverage:
+
+| File | What is tested |
+|---|---|
+| `test/domain/ecg_filter_test.dart` | IIR bandpass filter output |
+| `test/domain/r_peak_detector_test.dart` | Pan-Tompkins R-peak detection |
+| `test/domain/event_detection_test.dart` | Tachycardia / bradycardia / arrhythmia logic |
+| `test/data/ecg_packet_parser_test.dart` | 47-byte BLE packet decoding |
+| `test/data/ecg_ring_buffer_test.dart` | Ring buffer overflow, peek operations |
+| `test/data/ecg_demo_test.dart` | Demo waveform generator |
+| `test/integration_test.dart` | Full pipeline: packet → buffer → filter → peak |
+| `test/widget_test.dart` | App launch smoke test |
+
+---
+
+## Building a Release Binary
+
+### macOS
+
+```bash
+flutter build macos
+# Output: bsms_app/build/macos/Build/Products/Release/bsms_app.app
+```
+
+### iOS (requires paid Apple Developer account for distribution)
+
+```bash
+flutter build ios --release
+```
+
+Then archive and distribute from Xcode.
+
+### Android APK
+
+```bash
+flutter build apk --release
+# Output: bsms_app/build/app/outputs/flutter-apk/app-release.apk
+```
+
+---
+
+## Troubleshooting
+
+### BLE scanning does nothing on macOS
+- Check **System Settings → Privacy & Security → Bluetooth** — allow the app
+- Verify both Entitlements files contain `com.apple.security.device.bluetooth = true`
+- Rebuild after any plist change: `flutter clean && flutter run -d macos`
+
+### BLE scanning does nothing on iOS
+- Physical device required — BLE does not work in the simulator
+- Make sure both `NSBluetoothAlwaysUsageDescription` keys are in `ios/Runner/Info.plist`
+
+### `flutter gen-l10n` missing strings error
+```bash
+flutter gen-l10n
+flutter analyze
+```
+
+### CocoaPods errors on macOS / iOS
+```bash
+cd macos   # or ios
+pod install
+cd ..
+flutter run -d macos
+```
+
+### `flutter doctor` reports Xcode issues
+```bash
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+sudo xcodebuild -license accept
+```
+
+---
+
+## Project Authors
+
+Developed as a university biomedical engineering project.
+Hardware: ESP32 + ECG analog front-end
+Software: Flutter (Dart), signal processing in pure Dart
+
+GitHub: https://github.com/kamesky1202-debug/ECG-Mobile-Project

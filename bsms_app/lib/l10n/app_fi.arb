@@ -40,6 +40,11 @@
   "importedSummary": "Tuotu: {samples} näytettä ({skipped} virheellistä pakettia ohitettu)",
   "removeTooltip": "Poista",
   "importError": "Tiedosto on vioittunut tai sen muoto on tuntematon.",
+  "tileOptionsTooltip": "Valinnat",
+  "exportCsv": "Vie (CSV)",
+  "deleteAction": "Poista",
+  "exportInProgress": "Luodaan CSV-tiedostoa …",
+  "exportFailed": "Vienti epäonnistui: {error}",
   "sessionSubtitle": "{duration} · {samples} näytettä",
 
   "axisTime": "Aika",

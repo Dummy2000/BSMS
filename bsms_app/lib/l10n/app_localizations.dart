@@ -320,6 +320,36 @@ abstract class AppLocalizations {
   /// **'The file is corrupt or has an unknown format.'**
   String get importError;
 
+  /// No description provided for @tileOptionsTooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Options'**
+  String get tileOptionsTooltip;
+
+  /// No description provided for @exportCsv.
+  ///
+  /// In en, this message translates to:
+  /// **'Export (CSV)'**
+  String get exportCsv;
+
+  /// No description provided for @deleteAction.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete'**
+  String get deleteAction;
+
+  /// No description provided for @exportInProgress.
+  ///
+  /// In en, this message translates to:
+  /// **'Creating CSV …'**
+  String get exportInProgress;
+
+  /// No description provided for @exportFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Export failed: {error}'**
+  String exportFailed(String error);
+
   /// No description provided for @sessionSubtitle.
   ///
   /// In en, this message translates to:

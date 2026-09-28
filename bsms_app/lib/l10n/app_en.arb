@@ -46,6 +46,12 @@
   "@importedSummary": { "placeholders": { "samples": { "type": "int" }, "skipped": { "type": "int" } } },
   "removeTooltip": "Remove",
   "importError": "The file is corrupt or has an unknown format.",
+  "tileOptionsTooltip": "Options",
+  "exportCsv": "Export (CSV)",
+  "deleteAction": "Delete",
+  "exportInProgress": "Creating CSV …",
+  "exportFailed": "Export failed: {error}",
+  "@exportFailed": { "placeholders": { "error": { "type": "String" } } },
   "sessionSubtitle": "{duration} · {samples} samples",
   "@sessionSubtitle": { "placeholders": { "duration": { "type": "String" }, "samples": { "type": "int" } } },
 

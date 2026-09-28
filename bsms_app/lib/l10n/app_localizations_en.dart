@@ -130,6 +130,23 @@ class AppLocalizationsEn extends AppLocalizations {
   String get importError => 'The file is corrupt or has an unknown format.';
 
   @override
+  String get tileOptionsTooltip => 'Options';
+
+  @override
+  String get exportCsv => 'Export (CSV)';
+
+  @override
+  String get deleteAction => 'Delete';
+
+  @override
+  String get exportInProgress => 'Creating CSV …';
+
+  @override
+  String exportFailed(String error) {
+    return 'Export failed: $error';
+  }
+
+  @override
   String sessionSubtitle(String duration, int samples) {
     return '$duration · $samples samples';
   }

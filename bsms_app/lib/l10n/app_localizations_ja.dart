@@ -129,6 +129,23 @@ class AppLocalizationsJa extends AppLocalizations {
   String get importError => 'ファイルが破損しているか、形式が不明です。';
 
   @override
+  String get tileOptionsTooltip => 'オプション';
+
+  @override
+  String get exportCsv => 'エクスポート (CSV)';
+
+  @override
+  String get deleteAction => '削除';
+
+  @override
+  String get exportInProgress => 'CSVを作成中…';
+
+  @override
+  String exportFailed(String error) {
+    return 'エクスポートに失敗しました: $error';
+  }
+
+  @override
   String sessionSubtitle(String duration, int samples) {
     return '$duration · $samples サンプル';
   }

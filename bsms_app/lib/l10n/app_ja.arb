@@ -40,6 +40,11 @@
   "importedSummary": "インポート完了：{samples} サンプル（不正パケット {skipped} 件をスキップ）",
   "removeTooltip": "削除",
   "importError": "ファイルが破損しているか、形式が不明です。",
+  "tileOptionsTooltip": "オプション",
+  "exportCsv": "エクスポート (CSV)",
+  "deleteAction": "削除",
+  "exportInProgress": "CSVを作成中…",
+  "exportFailed": "エクスポートに失敗しました: {error}",
   "sessionSubtitle": "{duration} · {samples} サンプル",
 
   "axisTime": "時間",

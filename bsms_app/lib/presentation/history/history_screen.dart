@@ -1,4 +1,7 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:share_plus/share_plus.dart';
+import '../../data/export/csv_export_service.dart';
 import '../../data/import/sd_card_import_service.dart';
 import '../../data/storage/imported_session_repository.dart';
 import '../../data/storage/session_storage_service.dart';
@@ -24,6 +27,7 @@ class _HistoryScreenState extends State<HistoryScreen>
     with SingleTickerProviderStateMixin {
   late final TabController _tabs;
   final SdCardImportService _importService = SdCardImportService();
+  final CsvExportService _exportService = CsvExportService();
 
   bool _importing = false;
   List<ImportedSession> _bleRecordings = [];
@@ -86,6 +90,50 @@ class _HistoryScreenState extends State<HistoryScreen>
     _loadBleRecordings();
   }
 
+  Future<void> _export(ImportedSession session, Rect shareOrigin) async {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          content: Row(
+            children: [
+              const CircularProgressIndicator(),
+              const SizedBox(width: 20),
+              Expanded(child: Text(dialogContext.l10n.exportInProgress)),
+            ],
+          ),
+        ),
+      ),
+    );
+
+    File? file;
+    Object? error;
+    try {
+      file = await _exportService.export(session);
+    } catch (e) {
+      error = e;
+    }
+
+    if (!mounted) return;
+    Navigator.of(context, rootNavigator: true).pop();
+
+    if (file == null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(context.l10n.exportFailed('$error')),
+        backgroundColor: Theme.of(context).colorScheme.error,
+      ));
+      return;
+    }
+
+    await SharePlus.instance.share(ShareParams(
+      files: [XFile(file.path, mimeType: 'text/csv')],
+      subject: session.sourceFile,
+      sharePositionOrigin: shareOrigin,
+    ));
+  }
+
   @override
   Widget build(BuildContext context) {
     final sdSessions  = widget.sdRepository.getAll();
@@ -120,6 +168,7 @@ class _HistoryScreenState extends State<HistoryScreen>
                     return _SessionTile(
                       session: s,
                       onTap: () => _push(s),
+                      onExport: (origin) => _export(s, origin),
                       onDelete: () {
                         widget.sdRepository.remove(s.id);
                         setState(() {});
@@ -155,6 +204,7 @@ class _HistoryScreenState extends State<HistoryScreen>
                           return _SessionTile(
                             session: s,
                             onTap: () => _push(s),
+                            onExport: (origin) => _export(s, origin),
                             onDelete: () => _deleteBle(s),
                           );
                         },
@@ -185,14 +235,18 @@ class _HistoryScreenState extends State<HistoryScreen>
 
 // ── Shared session tile ───────────────────────────────────────────────────────
 
+enum _TileAction { export, delete }
+
 class _SessionTile extends StatelessWidget {
   final ImportedSession session;
   final VoidCallback onTap;
+  final ValueChanged<Rect> onExport;
   final VoidCallback onDelete;
 
   const _SessionTile({
     required this.session,
     required this.onTap,
+    required this.onExport,
     required this.onDelete,
   });
 
@@ -221,10 +275,39 @@ class _SessionTile extends StatelessWidget {
       ),
       isThreeLine: true,
       onTap: onTap,
-      trailing: IconButton(
-        icon: const Icon(Icons.delete_outline),
-        onPressed: onDelete,
-        tooltip: context.l10n.removeTooltip,
+      trailing: Builder(
+        builder: (menuContext) => PopupMenuButton<_TileAction>(
+          icon: const Icon(Icons.more_vert),
+          tooltip: context.l10n.tileOptionsTooltip,
+          onSelected: (action) {
+            switch (action) {
+              case _TileAction.export:
+                // iPad share sheets need an anchor rect.
+                final box = menuContext.findRenderObject() as RenderBox;
+                onExport(box.localToGlobal(Offset.zero) & box.size);
+              case _TileAction.delete:
+                onDelete();
+            }
+          },
+          itemBuilder: (_) => [
+            PopupMenuItem(
+              value: _TileAction.export,
+              child: ListTile(
+                leading: const Icon(Icons.file_download_outlined),
+                title: Text(context.l10n.exportCsv),
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+            PopupMenuItem(
+              value: _TileAction.delete,
+              child: ListTile(
+                leading: const Icon(Icons.delete_outline),
+                title: Text(context.l10n.deleteAction),
+                contentPadding: EdgeInsets.zero,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

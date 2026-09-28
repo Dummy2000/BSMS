@@ -20,9 +20,13 @@ subprojects {
     val newSubprojectBuildDir: Directory = newBuildDir.dir(project.name)
     project.layout.buildDirectory.value(newSubprojectBuildDir)
 
+    // Registered before the subproject applies AGP, so this runs after the
+    // plugin's own build.gradle (which may pin an older compileSdk, e.g.
+    // reactive_ble_mobile uses 33) but before AGP finalizes the DSL.
     afterEvaluate {
-        if (project.plugins.hasPlugin("com.android.library")) {
-            project.extensions.configure<LibraryExtension>("android") {
+        extensions.findByType(LibraryExtension::class.java)?.apply {
+            val current = compileSdkVersion?.removePrefix("android-")?.toIntOrNull()
+            if (current != null && current < androidCompileSdk) {
                 compileSdkVersion(androidCompileSdk)
             }
         }

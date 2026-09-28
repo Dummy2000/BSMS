@@ -60,6 +60,7 @@ dependencies:
 
   # Keeps screen + CPU awake during 12-hour recordings
   wakelock_plus: ^1.1.4
+  share_plus: ^12.0.2
 
   # Runtime permission requests (Bluetooth, Location, Storage)
   permission_handler: ^11.3.1

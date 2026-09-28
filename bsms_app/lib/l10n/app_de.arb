@@ -40,6 +40,11 @@
   "importedSummary": "Importiert: {samples} Samples ({skipped} fehlerhafte Pakete übersprungen)",
   "removeTooltip": "Entfernen",
   "importError": "Die Datei ist beschädigt oder hat ein unbekanntes Format.",
+  "tileOptionsTooltip": "Optionen",
+  "exportCsv": "Exportieren (CSV)",
+  "deleteAction": "Löschen",
+  "exportInProgress": "CSV wird erstellt …",
+  "exportFailed": "Export fehlgeschlagen: {error}",
   "sessionSubtitle": "{duration} · {samples} Samples",
 
   "axisTime": "Zeit",

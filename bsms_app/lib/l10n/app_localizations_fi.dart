@@ -132,6 +132,23 @@ class AppLocalizationsFi extends AppLocalizations {
       'Tiedosto on vioittunut tai sen muoto on tuntematon.';
 
   @override
+  String get tileOptionsTooltip => 'Valinnat';
+
+  @override
+  String get exportCsv => 'Vie (CSV)';
+
+  @override
+  String get deleteAction => 'Poista';
+
+  @override
+  String get exportInProgress => 'Luodaan CSV-tiedostoa …';
+
+  @override
+  String exportFailed(String error) {
+    return 'Vienti epäonnistui: $error';
+  }
+
+  @override
   String sessionSubtitle(String duration, int samples) {
     return '$duration · $samples näytettä';
   }

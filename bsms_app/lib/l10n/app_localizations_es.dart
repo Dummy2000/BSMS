@@ -132,6 +132,23 @@ class AppLocalizationsEs extends AppLocalizations {
       'El archivo está dañado o tiene un formato desconocido.';
 
   @override
+  String get tileOptionsTooltip => 'Opciones';
+
+  @override
+  String get exportCsv => 'Exportar (CSV)';
+
+  @override
+  String get deleteAction => 'Eliminar';
+
+  @override
+  String get exportInProgress => 'Creando CSV …';
+
+  @override
+  String exportFailed(String error) {
+    return 'Error al exportar: $error';
+  }
+
+  @override
   String sessionSubtitle(String duration, int samples) {
     return '$duration · $samples muestras';
   }

@@ -86,7 +86,7 @@ List<List<int>> _isolateReadFiltered(Map<String, dynamic> args) {
   final readStart = math.max(0, startIdx - warmup);
   final readCount = count + (startIdx - readStart); // extra warmup prefix
 
-  final raw = _readRawPairs(filePath, firstTs, readStart, readCount);
+  final raw = readRawPairs(filePath, firstTs, readStart, readCount);
 
   // Reconstruct EcgSample list for bandpass filter
   final allSamples = raw
@@ -110,12 +110,12 @@ List<List<int>> _isolateReadRaw(Map<String, dynamic> args) {
   final firstTs  = args['firstTs']  as int;
   final startIdx = args['startIdx'] as int;
   final count    = args['count']    as int;
-  return _readRawPairs(filePath, firstTs, startIdx, count);
+  return readRawPairs(filePath, firstTs, startIdx, count);
 }
 
-/// Core file reader shared by both isolate functions.
+/// Synchronous file reader — call only from a background isolate.
 /// Returns pairs [value, relativeTimestampMs] for samples [startIdx .. startIdx+count).
-List<List<int>> _readRawPairs(
+List<List<int>> readRawPairs(
     String filePath, int firstTs, int startIdx, int count) {
   const packetSize = 51;
   const samplesPerPacket = 20;

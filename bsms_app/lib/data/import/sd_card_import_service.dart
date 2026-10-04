@@ -23,10 +23,11 @@ class SdCardImportService {
     final bytes = file.bytes;
     if (bytes == null || bytes.isEmpty) return null;
 
-    return _parseBytes(bytes: bytes, fileName: file.name);
+    return parseBytes(bytes: bytes, fileName: file.name);
   }
 
-  ImportedSession _parseBytes({
+  /// Parses an SD card binary file already loaded into memory.
+  ImportedSession parseBytes({
     required Uint8List bytes,
     required String fileName,
   }) {
@@ -104,7 +105,8 @@ class SdCardImportService {
       }
 
       for (int i = 0; i < samplesPerPacket; i++) {
-        final value = bd.getUint16(offset + sampleOffset + i * 2, Endian.little);
+        // Firmware writes int16_t samples (ADS1115) — must be read signed.
+        final value = bd.getInt16(offset + sampleOffset + i * 2, Endian.little);
         final sampleIdx = blockIdx * samplesPerPacket + i;
         samples.add(EcgSample(
           value: value,

@@ -28,7 +28,10 @@ class EcgBleService {
   StreamSubscription<ConnectionStateUpdate>? _connectionSubscription;
   StreamSubscription<List<int>>? _notificationSubscription;
 
-  final StreamController<EcgPacket> _packetController = StreamController<EcgPacket>.broadcast();
+  final StreamController<EcgPacket> _packetController =
+      StreamController<EcgPacket>.broadcast();
+  final StreamController<bool> _connectionController =
+      StreamController<bool>.broadcast();
 
   String? _connectedDeviceId;
   final List<int> _incomingBuffer = [];
@@ -39,6 +42,9 @@ class EcgBleService {
 
   /// Stream of parsed ECG packets from the BLE device.
   Stream<EcgPacket> get ecgPackets => _packetController.stream;
+
+  /// Emits true on connect, false on disconnect.
+  Stream<bool> get connectionState => _connectionController.stream;
 
   /// Starts the BLE pipeline: scan for device, connect, synchronize timestamp,
   /// start ECG transmission, and subscribe to notifications.
@@ -96,6 +102,7 @@ class EcgBleService {
 
           if (connectionState.connectionState == DeviceConnectionState.connected && _connectedDeviceId == null) {
             _connectedDeviceId = deviceId;
+            _connectionController.add(true);
 
             try {
               // Request larger MTU to avoid packet fragmentation (47 bytes + headers)
@@ -113,12 +120,8 @@ class EcgBleService {
                 print('Optional timestamp sync failed: $e');
               }
 
-              // Attempt to start transmission, but don't stop if it fails
-              try {
-                await startEcgTransmission(deviceId);
-              } catch (e) {
-                print('Optional start command failed: $e');
-              }
+              // Do NOT auto-start: the ESP stays in standby after connecting and
+              // is started explicitly from the app (startMeasurement()).
 
               // Subscribe to notifications - THIS IS THE MOST CRITICAL PART
               await _subscribeToNotifications(deviceId);
@@ -128,6 +131,7 @@ class EcgBleService {
             }
           } else if (connectionState.connectionState == DeviceConnectionState.disconnected) {
             _connectedDeviceId = null;
+            _connectionController.add(false);
             print('Device disconnected');
             _packetController.addError('Device disconnected');
           }
@@ -151,6 +155,10 @@ class EcgBleService {
         characteristicId: Uuid.parse(characteristicUuid),
         deviceId: deviceId,
       );
+
+      // Always start with a clean buffer — stale bytes from a previous
+      // connection would misalign the packet framing permanently.
+      _incomingBuffer.clear();
 
       _notificationSubscription = _ble.subscribeToCharacteristic(characteristic).listen(
         (data) {
@@ -215,23 +223,23 @@ class EcgBleService {
       deviceId: deviceId,
     );
 
-    // Send timestamp as 4-byte little-endian uint32_t
-    final timestampBytes = ByteData(4);
-    timestampBytes.setUint32(0, timestampMs, Endian.little);
+    // Send timestamp as 8-byte little-endian int64 (Unix epoch ms).
+    // uint32 would overflow for current Unix timestamps (~1.748 trillion ms).
+    final timestampBytes = ByteData(8);
+    timestampBytes.setInt64(0, timestampMs, Endian.little);
     final data = timestampBytes.buffer.asUint8List();
 
     try {
-      // Try writing without response first (more common for ESP32)
-      await _ble.writeCharacteristicWithoutResponse(characteristic, value: data);
-      print('Timestamp sent to ESP32: $timestampMs ms (no response)');
+      // Write with response to guarantee the ESP32 onWrite callback fires.
+      await _ble.writeCharacteristicWithResponse(characteristic, value: data);
+      print('Timestamp sent to ESP32: $timestampMs ms (with response)');
     } catch (e) {
-      print('Failed to send timestamp without response: $e. Trying with response...');
+      print('Failed to send timestamp with response: $e. Trying without response...');
       try {
-        // Fallback to writing with response
-        await _ble.writeCharacteristicWithResponse(characteristic, value: data);
-        print('Timestamp sent to ESP32: $timestampMs ms (with response)');
+        await _ble.writeCharacteristicWithoutResponse(characteristic, value: data);
+        print('Timestamp sent to ESP32: $timestampMs ms (no response)');
       } catch (e2) {
-        print('Failed to send timestamp with response fallback: $e2');
+        print('Failed to send timestamp without response fallback: $e2');
         throw Exception('Failed to send timestamp to ESP32: $e2');
       }
     }
@@ -271,6 +279,21 @@ class EcgBleService {
       print('Failed to send stop command: $e');
       throw Exception('Failed to stop ECG transmission: $e');
     }
+  }
+
+  /// Brings the ESP32 out of standby into active measurement (start command).
+  /// No-op if not connected.
+  Future<void> startMeasurement() async {
+    final id = _connectedDeviceId;
+    if (id == null) return;
+    await startEcgTransmission(id);
+  }
+
+  /// Puts the ESP32 back into standby (stop command). No-op if not connected.
+  Future<void> standby() async {
+    final id = _connectedDeviceId;
+    if (id == null) return;
+    await stopEcgTransmission(id);
   }
 
   /// Returns true if currently connected to ECG device and device ID is tracked.

@@ -30,19 +30,41 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # Internationalisation (message formatting, locale handling)
+  intl: any
 
   # The following adds the Cupertino Icons font to your application.
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
 
   # BLE library for scanning, connecting, and receiving ECG packets
-  flutter_reactive_ble: ^5.0.2
+  flutter_reactive_ble: ^5.5.0
 
   # Storage helper for saving ECG CSV logs to device storage
   path_provider: ^2.0.15
 
   # Charting library for real-time ECG visualization
   syncfusion_flutter_charts: ^33.2.6
+
+  # Native file picker dialog for importing SD card binary files
+  file_picker: ^8.0.0
+
+  # Local SQLite database for persons and session metadata
+  sqflite: ^2.3.3
+
+  # Path joining for SQLite and file operations
+  path: ^1.9.0
+
+  # Keeps screen + CPU awake during 12-hour recordings
+  wakelock_plus: ^1.1.4
+  share_plus: ^12.0.2
+
+  # Runtime permission requests (Bluetooth, Location, Storage)
+  permission_handler: ^11.3.1
+  google_fonts: ^8.1.0
 
 dev_dependencies:
   flutter_test:
@@ -65,6 +87,15 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # Generate localization classes from the .arb files in lib/l10n.
+  generate: true
+
+  # Bundled retro font for the Konami "pixel mode" (works offline).
+  fonts:
+    - family: PressStart2P
+      fonts:
+        - asset: assets/fonts/PressStart2P-Regular.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

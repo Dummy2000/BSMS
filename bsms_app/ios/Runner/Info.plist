@@ -67,8 +67,10 @@
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
-	<string>This app needs Bluetooth access to connect to ECG monitoring devices.</string>
+	<string>Wird benötigt, um den EKG-Holter über Bluetooth zu verbinden und Messdaten zu empfangen.</string>
 	<key>NSBluetoothPeripheralUsageDescription</key>
-	<string>This app needs Bluetooth access to connect to ECG monitoring devices.</string>
+	<string>Wird benötigt, um den EKG-Holter über Bluetooth zu verbinden und Messdaten zu empfangen.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Wird für die Erkennung von Geräten im lokalen Netzwerk benötigt.</string>
 </dict>
 </plist>

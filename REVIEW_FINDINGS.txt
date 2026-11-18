@@ -1,0 +1,949 @@
+==========================================================================================
+BSMS - CODE REVIEW FINDINGS
+==========================================================================================
+Created:   2026-11-17
+Source:    AI-assisted review (Claude Code)
+Scope:     Flutter app (bsms_app/) and ESP32 firmware (ESP32code/src/main.cpp)
+Code base: branch wip-new at commit bf91609, plus the UNCOMMITTED standby change in
+           ESP32code/src/main.cpp (g_active, start/standby commands, standby on
+           disconnect)
+State:     H1, H2 and H3 fixed on 2026-11-18 (see their Status lines). Everything
+           else is still open.
+
+HOW TO USE THIS FILE
+- In the INDEX, mark [x] when an item is fixed and [-] when you decide not to fix it
+  (add a short reason).
+- Severity
+    HIGH    wrong results or lost data in normal use
+    MEDIUM  wrong in specific situations, fragile, or a clear user-facing gap
+    LOW     code health, polish, small inefficiencies
+- Evidence
+    VERIFIED    reproduced by running the real code on a synthetic ECG
+                (see VERIFICATION RECIPES at the end - usable as unit tests)
+    CALCULATED  computed from constants in the code
+    READ        found by reading the code, not executed
+- Area
+    DSP    = detection, HRV, events, filters    BLE      = app BLE link and recording
+    FW     = ESP32 firmware                     IMPORT   = SD card import
+    UI     = screens                            STORAGE  = database and files
+    EXPORT = CSV export                         PLATFORM = Android/iOS configuration
+    CODE, DOCS, REPO, TESTS = housekeeping
+- Paths are relative to the repo root. Line numbers are from 2026-11-17 and will drift;
+  the function or symbol named next to them is the stable pointer.
+- IDs H1-H8, M1-M21 and L1-L14 match the first review summary. M22-M27 and L15-L18 were
+  added when this file was written.
+
+==========================================================================================
+INDEX
+==========================================================================================
+HIGH
+[x] H1   DSP       Live recording finds no beats for the first ~55 s       VERIFIED
+[x] H2   DSP/FW    Searchback stores duplicate R-peaks                     VERIFIED
+[x] H3   DSP       One unusual early RR interval blocks all HRV values     VERIFIED
+[ ] H4   DSP       Offline detector: early artefact blinds it for ~50 s    VERIFIED
+[ ] H5   FW/BLE    BLE disconnect also stops SD logging (uncommitted)      READ
+[ ] H6   IMPORT    SD import loads everything into RAM on the UI thread    READ
+[ ] H7   IMPORT    SD import counts ~39 "skipped" packets per packet       READ
+[ ] H8   UI        Clock hard-coded to UTC+2; SD imports have no time      READ
+
+MEDIUM
+[ ] M1   BLE       BLE recordings mix sample-index time and device time    READ
+[ ] M2   BLE       Disconnect intervals always have zero length            READ
+[ ] M3   DSP       R-peak markers sit ~85 ms after the R apex              VERIFIED
+[ ] M4   DSP/FW    Detector bands don't fit Pan-Tompkins; 2 HR sources     CALCULATED
+[ ] M5   BLE       BLE path still reads int16 samples as unsigned          READ
+[ ] M6   BLE       Start/standby commands unconfirmed, errors unhandled    READ
+[ ] M7   BLE       Failed time sync is ignored -> 1970 timestamps          READ
+[ ] M8   BLE       Packet reassembly can lose framing until reconnect      READ
+[ ] M9   BLE       BLE plumbing (stopScan, disconnect, scan filter)        READ
+[ ] M10  BLE       Lost BLE packets are never detected                     READ
+[ ] M11  FW        Firmware sampling timing (bursts, no data-ready)        READ
+[ ] M12  FW        Firmware detector initialised once per boot             READ
+[ ] M13  FW        Firmware: data shared between tasks without lock        READ
+[ ] M14  FW        No BLE pairing or encryption                            READ
+[ ] M15  IMPORT    SD import ignores timestamps; format by file length     READ
+[ ] M16  PLATFORM  Permissions: location on Android 12+, storage, iOS      READ
+[ ] M17  DSP       SD vs BLE use different event logic; brady < 60         READ
+[ ] M18  UI        Session viewer can stay blank                           READ
+[ ] M19  UI        Deleting a BLE recording has no confirmation            READ
+[ ] M20  STORAGE   History list reads all R-peak files synchronously       READ
+[ ] M21  EXPORT    CSV export: temp files kept, no metadata, name          READ
+[ ] M22  IMPORT    SD imports are only kept in memory                      READ
+[ ] M23  DSP       Offline searchback uses the final threshold             READ
+[ ] M24  IMPORT    SD import: only FormatException is handled              READ
+[ ] M25  DSP/FW    Detection not paused during lead-off                    READ
+[ ] M26  PLATFORM  Recording needs the app in the foreground               READ
+[ ] M27  BLE       Disk-full write errors are never shown                  READ
+
+LOW
+[ ] L1   REPO      Dead code and 16 empty files                            READ
+[ ] L2   DOCS      Outdated comments and docs (47-byte format etc.)        READ
+[ ] L3   CODE      print() everywhere, avoid_print disabled                READ
+[ ] L4   STORAGE   Database: FKs off, no migrations, delete order          READ
+[ ] L5   UI        Hard-coded German text and date formats                 READ
+[ ] L6   UI/BLE    Performance: buffer trimming, sync I/O, scans           READ
+[ ] L7   UI        Lists don't refresh (History, person sessions)          READ
+[ ] L8   UI        Viewer summary bar can overflow                         READ
+[ ] L9   BLE       Recording service: start race, dispose, stop errors     READ
+[ ] L10  DSP       App HR clamped to 40-200 instead of rejected            READ
+[ ] L11  PLATFORM  Release config: com.example ID, debug signing           READ
+[ ] L12  TESTS     Test gaps                                               READ
+[ ] L13  REPO      Repo hygiene                                            READ
+[ ] L14  FW        Firmware SD handling and boot robustness                READ
+[ ] L15  DSP       Viewer filtering: causal, fixed 50 Hz, short warm-up    READ
+[ ] L16  UI        Person form errors; icon buttons without tooltips       READ
+[ ] L17  DSP/FW    Searchback rescans the buffer every sample              READ
+[ ] L18  CODE      Duplicated constants; 3 drifting Pan-Tompkins versions  READ
+
+SUGGESTED ORDER (a recommendation, not a decision)
+1. H1, H2, H3, H4 (+ M23, M25): detection and HRV correctness. Pure Dart, easy to test
+   with the recipes at the end. H2 needs the same fix in main.cpp.
+2. H5 - decide before committing the standby change - together with M6, M7, M26 and
+   an app auto-reconnect. Together they decide whether a night recording survives a
+   dropout.
+3. H8, M1, M2, M10: one time base and the device time zone.
+4. SD import rework: H6, H7, M15, M22, M24. Convert SD files into the same file-backed
+   session format the BLE recordings use, in a background isolate.
+5. M5 (same int16 fix as bf91609, for the BLE path): small and safe, can go any time.
+6. The rest by area.
+
+ALREADY FIXED
+- bf91609: the SD importer read int16 samples as unsigned (sd_card_import_service.dart,
+  getUint16 -> getInt16). Test: bsms_app/test/sd_card_import_test.dart.
+  The same bug still exists in the BLE path, see M5.
+
+==========================================================================================
+HIGH
+==========================================================================================
+
+------------------------------------------------------------------------------------------
+H1   Live recording finds no beats for the first ~55 s
+     HIGH | DSP | VERIFIED
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ble_recording_service.dart, class _StreamingPipeline
+          - filter state starts at 0 (L302-304), processSample (L360-392)
+          - 2 s threshold learning in _detect (L396-405)
+What:     The live detector's filters start from zero. The first raw sample (~13200 LSB,
+          the ADS1115 baseline) is a huge step for the 0.5 Hz high-pass. The transient
+          dominates the 2 s learning window, so SPKI/NPKI start far too high and then
+          decay at only ~5.75 %/s.
+Impact:   Roughly the first minute of every BLE recording has (almost) no R-peaks, so
+          HR, HRV and events are missing there. The transient also produces fake peaks
+          at the very start (through the H2 searchback bug).
+Evidence: 10 min synthetic ECG at 75 bpm, raw values including the baseline:
+          - 8 fake peaks at samples 75-82
+          - first real beat found at 54.8 s
+          - minute 1: 7 of 73 beats found, plus 39 fake/duplicate peaks
+          - minutes 2-10: 75 of 75 each
+          Same signal with the baseline subtracted: every beat found.
+          The firmware is not affected: it subtracts the boot baseline first
+          (main.cpp L525).
+Fix:      Pre-warm the filter state with the first sample (EcgFilter.bandpass already
+          does this) or subtract a baseline before filtering. Seed the thresholds
+          robustly (skip the first ~0.5 s, or use the median of per-second maxima
+          instead of the maximum).
+Status:   FIXED 2026-11-18. The high-pass state now starts from the first sample, so
+          the baseline causes no step. In addition: if no beat has been found 3 s
+          after learning and the last 2 s stay below half of the learned level, the
+          thresholds are learned again (an artefact in the first 2 s now costs ~5 s
+          instead of ~38 s), and searchback only runs after a first beat.
+          Test: bsms_app/test/streaming_pipeline_test.dart
+
+------------------------------------------------------------------------------------------
+H2   Searchback stores duplicate R-peaks
+     HIGH | DSP/FW | VERIFIED
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ble_recording_service.dart _StreamingPipeline._searchback
+          (L511-534, loop at L519)
+          ESP32code/src/main.cpp detectPeakPT, searchback block (L246-271, loop at L256)
+What:     When no beat was found for 1.66 x mean RR, the code takes the largest MWI
+          value from the buffer. The intent is to skip the 200 ms right after the last
+          beat. The loop instead skips the newest 200 ms ("k" counts back from now) and
+          runs right up to the sample after the last beat. The maximum is then usually
+          at a window edge: the falling tail of the previous beat, or the rising edge of
+          the current one. After a hit, the same thing happens again a few samples later.
+Impact:   Fake R-peaks 1 sample apart, or one beat stored twice ~100 samples apart. They
+          are written to the R-peak file and end up in the CSV export, HRV and event
+          detection. Each one also becomes the "last beat" reference (the next RR is
+          measured from it) and lowers SPKI. The session viewer only hides them
+          (minGap = 100, imported_session_screen.dart L182). In the firmware, RRs below
+          250 ms don't change the HR, but the reference and SPKI are still affected.
+Evidence: Synthetic ECG, baseline removed, 35 beats with a 3 s pause after the beat at
+          sample 9800 -> 39 stored peaks:
+          - the first beat (sample 1000) is stored twice: 986 and 1086
+          - 9892, 9893 and 9894 inside the pause (the real beat was detected at 9835)
+          In the H1 run: 31 duplicates 1 sample apart around 55-56.5 s.
+Fix:      Search only from (last beat + 200 ms) to (now - a small margin), i.e. k from
+          ~0 to samplesSinceBeat - 100. Accept only a real local maximum, not a window
+          edge. Never store a peak closer than 200 ms to the previous one. Apply the
+          same fix in main.cpp.
+Status:   FIXED 2026-11-18 in the app and in main.cpp. Window = from 200 ms after the
+          last beat to 200 ms before now, only real local maxima. In addition:
+          candidates within 360 ms of the last beat must pass the T-wave check, and
+          searchback doesn't run while a peak is being tracked. Recordings made
+          before the fix keep their stored duplicates.
+          Test: bsms_app/test/streaming_pipeline_test.dart (app). The firmware was
+          compiled and checked with a Dart port of detectPeakPT, not on hardware.
+
+------------------------------------------------------------------------------------------
+H3   One unusual early RR interval blocks all HRV values
+     HIGH | DSP | VERIFIED
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/domain/processing/hrv_calculator.dart _acceptRr (L91-98), used by
+          nnIntervals (L101-111) and the live addPeak (L64-86)
+What:     An RR interval is kept only if it differs by at most 20 % from the previous
+          *accepted* interval. If that reference is unusual (a missed beat or artefact
+          at the start, or HR changed during a lead-off or BLE gap), every later normal
+          interval differs by more than 20 % and is rejected. The reference never moves
+          again.
+          Also: RMSSD uses differences between consecutive *kept* intervals, even when
+          rejected intervals lay between them. Only originally adjacent pairs should be
+          used.
+Impact:   SDNN, RMSSD and live RMSSD can stay empty for a whole recording.
+Evidence: R-peaks at 0, 1500, 2300 ms and then every 800 ms (1 x 1500 ms + 101 x 800
+          ms): nnIntervals keeps 1 interval ([1500]); SDNN = null, RMSSD = null, live
+          RMSSD = null.
+Fix:      Compare against a robust reference (median of the last 5-10 raw RRs), or
+          reset the reference after a few consecutive rejections. Compute successive
+          differences only for originally adjacent intervals. Add this case as a test.
+Status:   FIXED 2026-11-18. The reference is the median of up to 3 plausible
+          intervals on each side (live: the last 6), and RMSSD only pairs intervals
+          that were adjacent before filtering.
+          Test: bsms_app/test/hrv_calculator_test.dart
+
+------------------------------------------------------------------------------------------
+H4   Offline detector: early artefact blinds it for ~50 s
+     HIGH | DSP | VERIFIED
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/domain/processing/r_peak_detector.dart _panTompkins
+          - seed = maximum of the first 2 s (L59-62)
+          - decay only if meanRr > 0, and only for SPKI (L73-76)
+          Used for SD imports (viewer) and SD CSV export.
+What:     Thresholds are seeded from the largest MWI value in the first 2 s, so one
+          artefact there (movement, touching an electrode, an ADC step) makes SPKI many
+          times too high. The recovery decay only runs after two accepted peaks
+          (meanRr > 0), lowers only SPKI and is slow (~5.75 %/s). The live and firmware
+          detectors decay both thresholds and use a default gap when RR is unknown;
+          their comments explain why SPKI alone isn't enough.
+Impact:   Beats are missing for a long stretch, which gives false pauses/bradycardia and
+          wrong mean HR and HRV. If the artefact yields no accepted peaks at all, the
+          decay never starts (from reading the code; not simulated).
+Evidence: 60 s synthetic ECG at 75 bpm. Clean: 75 of 75 found. With a 300 ms,
+          +8000 LSB step at t = 1 s: 17 peaks, of which 15 are real beats; nothing
+          between 1.5 s and 49.5 s.
+Fix:      Seed from a robust value over a longer window (e.g. median of per-second
+          maxima over 8-10 s), use the same decay as the live detector, and re-learn
+          after N seconds without a beat.
+
+------------------------------------------------------------------------------------------
+H5   BLE disconnect also stops SD logging (uncommitted change)
+     HIGH | FW/BLE | READ
+------------------------------------------------------------------------------------------
+Where:    ESP32code/src/main.cpp (uncommitted):
+          - MyServerCallbacks::onDisconnect sets g_active = false (L372-378)
+          - loop() returns early in standby (L514-517)
+          - start/standby commands (L349-361)
+          bsms_app/lib/data/ble/ecg_ble_service.dart: a disconnect is only reported
+          (L132-137); there is no reconnect.
+What:     On every BLE disconnect the ESP switches to standby and stops sampling,
+          including SD logging. After a reconnect it waits for a new start command, and
+          the app does not reconnect by itself. SD logging also only runs after the app
+          has started a measurement, so the ESP can't record on its own.
+Impact:   Phone out of range, a BLE glitch or the app being killed (see M26) ends the
+          recording on the phone AND on the SD card. The SD card can no longer bridge
+          BLE dropouts, which is the main reason a Holter has one.
+Fix:      Decide before committing. Proposal: keep sampling and SD logging independent
+          of the link (a disconnect only stops notifications; standby only via the
+          explicit 0x00 command or a button). Add auto-reconnect in the app that resumes
+          the running recording. Optionally add a "measuring" bit to status_flags so the
+          app can see the device state.
+
+------------------------------------------------------------------------------------------
+H6   SD import loads everything into RAM on the UI thread
+     HIGH | IMPORT | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/import/sd_card_import_service.dart
+          - importFromFile: withData: true (L14-18)
+          - parseBytes: one EcgSample object per sample (L107-115)
+          bsms_app/lib/presentation/history/imported_session_screen.dart initState:
+          EcgFilter.bandpass + RPeakDetector.detect (L95-96)
+What:     The whole file is read into memory and turned into one Dart object per
+          sample. The viewer then builds a second, filtered list and runs detection.
+          All of this happens on the UI isolate.
+Impact:   12 h = 21.6 million samples. Rough estimate: 0.4-0.9 GB for the parsed list
+          and about the same again for the filtered copy. Long recordings freeze the app
+          for a long time or get it killed (out of memory).
+Fix:      Stream-parse in a background isolate and convert the file into the
+          file-backed format BLE recordings already use (51-byte blocks + R-peak file +
+          HR file), then open it in the existing file-backed viewer. Also solves M22.
+
+------------------------------------------------------------------------------------------
+H7   SD import counts ~39 "skipped" packets per packet
+     HIGH | IMPORT | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/import/sd_card_import_service.dart parseBytes (L70-75)
+What:     Gap detection reads bytes 0-3 as a packet counter. In the 51-byte format these
+          are the low 32 bits of the millisecond timestamp, which grows by 40 per packet,
+          so each packet adds 39 "missing" packets.
+Impact:   skippedPackets is ~39 x the packet count (~42 million for 12 h). The import
+          snack bar shows this number (history_screen.dart L69-73). Real gaps can't be
+          told apart.
+Fix:      For 51-byte files use the uint64 timestamps: a gap is a delta > 40 ms plus
+          tolerance, and missing = round(delta / 40) - 1. Keep the counter logic for
+          47-byte files.
+
+------------------------------------------------------------------------------------------
+H8   Clock hard-coded to UTC+2; SD imports have no time
+     HIGH | UI | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/presentation/live_ecg/live_ecg_screen.dart L280 (utcOffsetMs)
+          bsms_app/lib/presentation/history/imported_session_screen.dart L283-291
+          (_utcOffsetMs, _formatAsViennaTime), used by _formatWindowPosition (L293) and
+          _eventTimeFmt (L307)
+          ESP32code/src/main.cpp L27-28 (UTC_OFFSET_HOURS, serial output only)
+What:     Wall-clock time is computed as UTC + 2 h. Since the switch to CET at the end
+          of October, every displayed time is 1 h ahead in Austria, and it is wrong in
+          any other time zone. SD imports have no absolute time at all (sample index x
+          2 ms, starting at 0), so their time axis starts at a made-up "2:00:00".
+Fix:      Format via DateTime.fromMillisecondsSinceEpoch(ms) (device time zone incl.
+          DST) and intl DateFormat. For SD imports use the packet timestamps (H7, M15).
+          Firmware: keep UTC on the wire and on SD; for serial output use a POSIX TZ
+          rule such as "CET-1CEST,M3.5.0,M10.5.0/3".
+
+==========================================================================================
+MEDIUM
+==========================================================================================
+
+------------------------------------------------------------------------------------------
+M1   BLE recordings mix sample-index time and device time
+     MEDIUM | BLE | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ble_recording_service.dart _onPacket (L194-261):
+          R-peaks and HRV use sample index x 2 ms (L229-235); lead-off intervals
+          (L240-249) and the HR file (L218-225) use device timestamps.
+          bsms_app/lib/presentation/history/imported_session_screen.dart: HR and events
+          from peak indices plus applyLeadOff (L83-89); clock = index x 2 + first
+          timestamp (L293-308).
+What:     The stored waveform has no gaps (packets are simply appended), so everything
+          index-based lines up: waveform, R-peak markers, events and event navigation.
+          Lead-off intervals and the HR file use device time, which keeps running during
+          a BLE gap.
+Impact:   After a gap of G seconds:
+          - lead-off shading is drawn G s too late and applyLeadOff removes the wrong
+            events
+          - displayed clock times fall behind by the sum of all earlier gaps
+          - the RR interval across the gap ignores the missing time, giving one false HR
+            value and possibly a false event
+          - the live detector treats both sides of the gap as continuous signal
+Fix:      Use one time base. Simplest: keep the sample index, convert lead-off to
+          indices while recording, store each gap as (index, real duration from the
+          device timestamps), add the gap durations when showing clock times, and don't
+          compute RR across a gap.
+
+------------------------------------------------------------------------------------------
+M2   Disconnect intervals always have zero length
+     MEDIUM | BLE | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ble_recording_service.dart _onConnectionChange (L177-192)
+What:     Start and end are both _globalSampleIdx x 2, which doesn't advance while
+          disconnected, so start == end. A disconnect before the first sample isn't
+          stored at all (L184: _disconnectStartSampleIdx > 0).
+Fix:      Part of M1: store (index of the junction, real duration).
+
+------------------------------------------------------------------------------------------
+M3   R-peak markers sit ~85 ms after the R apex
+     MEDIUM | DSP | VERIFIED
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ble_recording_service.dart _detect (the peak is the MWI
+          maximum, L449-472); the same in r_peak_detector.dart (L101) and the firmware
+What:     The stored index is the maximum of the 150 ms moving-window integral, which
+          lags the R apex. RR intervals are fine because the lag is almost constant, but
+          the markers and the CSV column is_r_peak are off.
+Evidence: Lag: median 42 samples (84 ms), maximum 48 (96 ms). Peaks found by searchback
+          can be ~20-30 ms early.
+Fix:      After detection, refine the position: take the maximum of |bandpassed signal|
+          within ~150 ms before the MWI peak and store that index.
+
+------------------------------------------------------------------------------------------
+M4   Detector bands don't fit Pan-Tompkins; 2 HR sources
+     MEDIUM | DSP/FW | CALCULATED
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ble_recording_service.dart _computeCoefficients
+          (L537-556: HP 0.5 Hz, LP 40 Hz, notch 50 Hz)
+          bsms_app/lib/domain/processing/r_peak_detector.dart (gets EcgFilter output,
+          0.5-40 Hz)
+          ESP32code/src/main.cpp bandpass biquad (L116-118)
+          bsms_app/lib/presentation/live_ecg/live_ecg_screen.dart L454
+What:     Pan-Tompkins expects ~5-15 Hz before the derivative, to suppress P/T waves and
+          baseline wander. The app detectors get 0.5-40 Hz, so there is more T-wave and
+          noise energy in the MWI.
+          The firmware biquad (b = 0.0305, 0, -0.0305; a = -1.9347, 0.9389) peaks at
+          5.2 Hz with a -3 dB band of 3.3-8.3 Hz. Relative to the peak, 10 Hz is at
+          -4.9 dB and 15 Hz at -9.0 dB: too low for the QRS energy.
+          Two HR sources: the live screen shows the firmware HR, but the app pipeline's
+          HR while recording (L454), so the value can jump when a recording starts. The
+          two also handle outliers differently (see L10).
+Fix:      Use a dedicated 5-15 Hz bandpass for detection and keep 0.5-40 Hz for display.
+          Redesign the firmware biquad for 5-15 Hz at 500 Hz. Choose one HR source.
+
+------------------------------------------------------------------------------------------
+M5   BLE path still reads int16 samples as unsigned
+     MEDIUM | BLE | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ecg_packet_parser.dart L58 (getUint16)
+          bsms_app/lib/data/storage/session_reader.dart L149 (getUint16)
+          bsms_app/lib/data/ble/ble_recording_service.dart _serializePacket L279
+          (setUint16)
+What:     The same bug that bf91609 fixed for SD import; the firmware sends int16. A
+          reading below 0 (possible when the analog front end rails low on lead-off)
+          becomes ~65535 in the live chart, live detection, the session viewer and the
+          BLE CSV export. setUint16 happens to write the same bytes, so stored files are
+          correct; only the reads are wrong.
+Fix:      Use getInt16 in both readers and setInt16 in the serializer, with tests like
+          test/sd_card_import_test.dart.
+
+------------------------------------------------------------------------------------------
+M6   Start/standby commands unconfirmed, errors unhandled
+     MEDIUM | BLE | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ecg_ble_service.dart start/stopEcgTransmission
+          (L249-282, write without response at L258 and L276), startMeasurement and
+          standby (L286-297)
+          bsms_app/lib/presentation/live_ecg/live_ecg_screen.dart _toggleEsp (L137-150)
+What:     Commands are written without response. startMeasurement() silently does
+          nothing when no device is tracked as connected (e.g. right after a
+          disconnect), yet _toggleEsp still switches the UI to "active". If a write
+          throws, _toggleEsp has no try/catch, so the error is unhandled and the user
+          sees nothing.
+Impact:   The UI can show "measuring" while the ESP is in standby: no data and no SD
+          logging.
+Fix:      Write with response, catch and show errors, and switch the UI only after
+          success. Better: derive "active" from arriving packets or a status bit.
+
+------------------------------------------------------------------------------------------
+M7   Failed time sync is ignored -> 1970 timestamps
+     MEDIUM | BLE | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ecg_ble_service.dart L115-121 (a failure is only printed)
+          ESP32code/src/main.cpp realTimestampMs (L56-59) falls back to millis() since
+          boot
+What:     If the sync write fails, the app carries on. Packets then carry the time since
+          boot, which the app shows as 1 Jan 1970.
+Fix:      Retry. If it still fails, warn and don't start a recording (or mark its
+          timestamps invalid). Check timestamps for plausibility (e.g. year < 2020).
+
+------------------------------------------------------------------------------------------
+M8   Packet reassembly can lose framing until reconnect
+     MEDIUM | BLE | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ecg_ble_service.dart _subscribeToNotifications (L159-181)
+What:     Notifications are appended to a byte buffer and cut into 51-byte pieces. BLE
+          never splits one notification (a too-small MTU truncates it instead), so this
+          only adds risk. One notification of a different length shifts every following
+          packet. Most then fail to parse (sample_count != 20) and the rest are garbage,
+          until the next reconnect.
+Fix:      One notification = one packet: parse it if its length is 51, otherwise drop
+          and count it.
+
+------------------------------------------------------------------------------------------
+M9   BLE plumbing (stopScan, disconnect, scan filter)
+     MEDIUM | BLE | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ble_service.dart (scan L10-15, stopScan L18-20)
+          bsms_app/lib/data/ble/ble_device_connector.dart (L10-29)
+          bsms_app/lib/data/ble/ecg_ble_service.dart start (L51-86), stop (L196-215)
+What:     - stopScan() calls _ble.deinitialize(). That tears down flutter_reactive_ble's
+            whole native client (all connections and subscriptions), not just the scan.
+            Cancelling the scan subscription, which already happens at L69, is enough.
+          - BleDeviceConnector._connectionSubscription is never assigned, so its
+            disconnect() does nothing. Harmless today because stop() cancels its own
+            subscription (L208), but misleading.
+          - stop() never emits "disconnected" on connectionState.
+          - The scan has no timeout and no service-UUID filter; it matches on the name
+            only. The comment "ESP32 advertises without it" is wrong: main.cpp L496
+            advertises the service UUID.
+Fix:      Drop deinitialize(), fix or remove BleDeviceConnector, emit false in stop(),
+          and scan with withServices: [serviceUuid] and a timeout with a message.
+
+------------------------------------------------------------------------------------------
+M10  Lost BLE packets are never detected
+     MEDIUM | BLE | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ble_recording_service.dart _onPacket (no timestamp
+          check); the session is created with skippedPackets: 0 (L147)
+What:     Consecutive device timestamps should be 40 ms apart, but they are never
+          compared. Every BLE recording reports 0 skipped packets.
+Fix:      Compare each packet's timestamp with the previous one, then count and store
+          the gaps (see M1).
+
+------------------------------------------------------------------------------------------
+M11  Firmware sampling timing (bursts, no data-ready)
+     MEDIUM | FW | READ
+------------------------------------------------------------------------------------------
+Where:    ESP32code/src/main.cpp loop() (L519-571), ADS1115 setup (L452-454), packet
+          header (L536-539)
+What:     - nextSampleTime += 2000 catches up after any delay (SD write or flush, BLE) by
+            sampling in a burst. getLastConversionResults() then returns the same
+            conversion several times: duplicated samples and compressed time.
+          - The ADC runs continuously at 860 SPS and is read every 2 ms without
+            data-ready sync, so the sample age is irregular (up to ~1.2 ms jitter).
+          - Lead-off flags are stored only from the first sample of each 20-sample
+            packet.
+          - batchIndex isn't reset on start or standby, so the first packet after a
+            restart mixes old and new samples under the old timestamp.
+Fix:      Pace sampling with a hardware timer or the ADS1115 ALERT/RDY pin. On overrun,
+          skip and flag instead of bursting. OR the lead-off bits over the batch. Reset
+          the batch on start.
+
+------------------------------------------------------------------------------------------
+M12  Firmware detector initialised once per boot
+     MEDIUM | FW | READ
+------------------------------------------------------------------------------------------
+Where:    ESP32code/src/main.cpp detectPeakPT (static init state L196-218), detector
+          globals (L146-161), filter state (bandpass, diffBuf, mwiBuf)
+What:     The 2 s threshold learning runs once per boot: the static "initialized" is
+          never reset. Thresholds and filter states aren't reset on start or standby
+          either. If the first start happens with the electrodes off or during movement,
+          the seed is wrong and only the slow decay fixes it. After a long standby,
+          stale thresholds are reused. (Not simulated.)
+Fix:      Reset the filters, thresholds and learning phase on every start command (and
+          after a lead-off ends).
+
+------------------------------------------------------------------------------------------
+M13  Firmware: data shared between tasks without lock
+     MEDIUM | FW | READ
+------------------------------------------------------------------------------------------
+Where:    ESP32code/src/main.cpp: deviceConnected (L41, not volatile); the time sync
+          variables (L52-54) are written in onWrite (L342-347) and read in
+          realTimestampMs (L56-59); nextSampleTime is set in onWrite (L352) and in loop
+          (L520)
+What:     BLE callbacks run in the BLE task, loop() in the Arduino task. The three sync
+          variables are updated one after another without a lock (and the 64-bit one in
+          two 32-bit halves). During a re-sync, loop() can combine the new wall time
+          with the old boot time, so one packet gets a timestamp that is off by the time
+          since the previous sync. This becomes relevant once H5 is fixed (sampling
+          continues while the app reconnects and re-syncs). nextSampleTime is changed by
+          both tasks.
+Fix:      Use a critical section (portENTER_CRITICAL) or a FreeRTOS queue for the sync
+          value, volatile/atomic flags, and set nextSampleTime inside loop() when
+          g_active turns on.
+
+------------------------------------------------------------------------------------------
+M14  No BLE pairing or encryption
+     MEDIUM | FW | READ
+------------------------------------------------------------------------------------------
+Where:    ESP32code/src/main.cpp characteristic setup (L484-492)
+What:     READ/NOTIFY/WRITE without any security. Anyone in range can connect, read the
+          ECG (health data), set the device clock or stop the measurement.
+Fix:      Bonding with encryption (BLESecurity, encrypted characteristic permissions);
+          accept commands only from the bonded phone.
+
+------------------------------------------------------------------------------------------
+M15  SD import ignores timestamps; format by file length
+     MEDIUM | IMPORT | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/import/sd_card_import_service.dart parseBytes: format chosen
+          by file length (L39-53), times from the block index (L90, L110-113)
+          ESP32code/src/main.cpp: one file per boot (findNextFilename L386-395, called
+          once from setup)
+What:     - Times are block index x 40 ms, so real gaps (power loss, standby) disappear.
+          - All measurements of one power-on go into one file, standby periods included,
+            so several measurements are shown as one continuous recording.
+          - Detection by length only: a 47-byte file whose packet count is a multiple of
+            51 (length a multiple of 2397) is parsed as 51-byte, giving garbage. A file
+            with a partial last packet is rejected completely (or, if its length happens
+            to be a multiple of 47, parsed as the legacy format).
+Fix:      Read the uint64 timestamps and split or mark gaps. Detect the format from
+          header plausibility (sample_count == 20 at the expected offsets, sane
+          timestamps). Ignore a trailing partial packet.
+
+------------------------------------------------------------------------------------------
+M16  Permissions: location on Android 12+, storage, iOS
+     MEDIUM | PLATFORM | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/presentation/permissions/permission_gate.dart (required list
+          L39-48, storage tile L119-130)
+          bsms_app/android/app/src/main/AndroidManifest.xml (L37-55) and the merged
+          manifest
+What:     - Location is required on every Android version, although the comment says
+            "needed for BLE scan on Android <= 11" and BLUETOOTH_SCAN has
+            neverForLocation. It can only be requested on 12+ because rxandroidble
+            1.16.0 (used by flutter_reactive_ble) adds uses-permission-sdk-23 location
+            entries without maxSdkVersion. Users who refuse location are locked out for
+            nothing.
+          - The screen shows a "Storage" tile that is never requested
+            (READ_EXTERNAL_STORAGE is declared up to API 32 but the picker doesn't need
+            it).
+          - iOS: there is no ios/Podfile yet. permission_handler needs
+            PERMISSION_BLUETOOTH=1 in the Podfile, otherwise it reports Bluetooth as
+            (permanently) denied. The Info.plist texts are German only.
+Fix:      Request location only on Android <= 11 (check the SDK version, e.g. with
+          device_info_plus) and remove the library's sdk-23 entries with
+          tools:node="remove". Drop the storage tile and permission. Add the Podfile
+          macro when setting up iOS, and localize InfoPlist.strings.
+
+------------------------------------------------------------------------------------------
+M17  SD vs BLE use different event logic; brady < 60
+     MEDIUM | DSP | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/presentation/history/imported_session_screen.dart initState
+          (L101-118)
+          bsms_app/lib/domain/processing/event_detection_service.dart (thresholds
+          L24-26, detect L33, detectFromHrData L83, detectFromPeakIndices L122)
+What:     SD imports with firmware HR (always the case now) get tachy/brady events from
+          detectFromHrData: one event per threshold crossing of the per-packet HR, with
+          no minimum duration and no hysteresis (HR around 60 gives many events). BLE
+          recordings use episodes from detectFromPeakIndices, so the same signal gives
+          different event lists. Brady < 60 bpm flags most of a normal night.
+          detect() and detectFromPeakIndices() are near-copies that have drifted apart.
+Fix:      Use one path for all sessions (beats -> detectFromPeakIndices) with a minimum
+          duration and hysteresis. Make the thresholds configurable (e.g. brady < 50, or
+          day/night values).
+
+------------------------------------------------------------------------------------------
+M18  Session viewer can stay blank
+     MEDIUM | UI | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/presentation/history/imported_session_screen.dart
+          _loadCacheAround (L127-149), _onWindowMoved (L151-160)
+What:     Requests made while a load is running are dropped (L128), so after a fast jump
+          the chart can be empty until the next move. A failed load is swallowed (L146).
+          If that was the first load, the cache stays empty and _onWindowMoved never
+          loads again (L153): blank for good.
+Fix:      Remember the latest requested position and load it when the current load
+          ends. Show an error state with retry.
+
+------------------------------------------------------------------------------------------
+M19  Deleting a BLE recording has no confirmation
+     MEDIUM | UI | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/presentation/history/history_screen.dart _deleteBle (L88-91)
+What:     Hours of data are deleted with one tap. Deleting a person asks first
+          (persons_screen.dart L54).
+Fix:      Use the same confirmation dialog.
+
+------------------------------------------------------------------------------------------
+M20  History list reads all R-peak files synchronously
+     MEDIUM | STORAGE | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/storage/session_storage_service.dart loadAll (L48-52) ->
+          _rowToSession (L65) -> readAsBytesSync (L116-117)
+What:     Opening History reads every recording's R-peak file on the UI isolate
+          (~216 KB per 12 h recording).
+Fix:      Load the peaks only when a session is opened, and keep summary values (beat
+          count, mean HR, duration) in the DB.
+
+------------------------------------------------------------------------------------------
+M21  CSV export: temp files kept, no metadata, name
+     MEDIUM | EXPORT | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/export/csv_export_service.dart (export L17-37, _fileName
+          L39-44); the session label is 'BLE - <person name>'
+          (ble_recording_service.dart L145)
+What:     - Exports go to the temp directory and are never deleted (~0.5 GB per 12 h).
+          - There is no metadata: no start time (timestamps are relative), sampling
+            rate, units or device. The values are raw ADC.
+          - The export contains the H2 duplicate peaks.
+          - SD exports re-run the offline detector while BLE exports use the live peaks,
+            so the two paths give different peaks for the same signal.
+          - The person's name ends up in the shared file name.
+Fix:      Delete after sharing (or clean old exports on start). Add a header or sidecar
+          JSON with an ISO 8601 start time, fs, units and firmware version. Dedupe the
+          peaks, use one detector, and use IDs or dates in file names.
+
+------------------------------------------------------------------------------------------
+M22  SD imports are only kept in memory
+     MEDIUM | IMPORT | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/storage/imported_session_repository.dart (a plain list)
+          bsms_app/lib/presentation/history/history_screen.dart _importFile (L62-86)
+What:     Imported SD sessions are gone after an app restart, can't be assigned to a
+          person, and have to be imported again each time (with the cost from H6).
+Fix:      Covered by the H6 fix: store the import as a file-backed session with a
+          person.
+
+------------------------------------------------------------------------------------------
+M23  Offline searchback uses the final threshold
+     MEDIUM | DSP | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/domain/processing/r_peak_detector.dart _panTompkins (L112-120),
+          _searchback (L126-154)
+What:     Searchback runs once, after the whole pass, with half of the *final* threshold
+          for every gap in the recording. The amplitude changes over hours (posture,
+          electrode contact), so early gaps are searched with the wrong threshold. Too
+          high: beats stay missing. Too low: noise becomes beats. Peaks found this way
+          don't update the thresholds or the mean RR.
+Fix:      Do searchback inline, with the threshold valid at that time (like the live
+          detector, once H2 is fixed).
+
+------------------------------------------------------------------------------------------
+M24  SD import: only FormatException is handled
+     MEDIUM | IMPORT | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/presentation/history/history_screen.dart _importFile (L62-86,
+          catch at L76)
+What:     Any other error (file picker failure, I/O error, out of memory on a big file)
+          escapes as an unhandled async exception. The spinner stops and there is no
+          message.
+Fix:      Catch everything and show a message; keep the specific one for
+          FormatException.
+
+------------------------------------------------------------------------------------------
+M25  Detection not paused during lead-off
+     MEDIUM | DSP/FW | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ble_recording_service.dart _detect (L449-477);
+          processSample gets no lead-off information
+          ESP32code/src/main.cpp detectPeakPT (L273-297); lead-off is read in loop
+          (L532-534) but not used
+          bsms_app/lib/domain/processing/r_peak_detector.dart ignores lead-off intervals
+What:     While the electrodes are off, the noisy or saturated signal keeps feeding the
+          detector. An above-threshold stretch is tracked with no time limit and then
+          confirmed as one huge "beat", which raises SPKI by up to x1.5. After the
+          electrodes are re-attached, real beats can be missed until the decay catches
+          up, giving false pauses/brady right after the lead-off. (applyLeadOff only
+          hides events inside the lead-off interval itself.)
+Fix:      Freeze detection and threshold updates during lead-off and re-learn briefly
+          afterwards. Treat above-threshold stretches longer than a QRS (~0.3 s) as
+          noise.
+
+------------------------------------------------------------------------------------------
+M26  Recording needs the app in the foreground
+     MEDIUM | PLATFORM | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/android/app/src/main/AndroidManifest.xml (no foreground service)
+          bsms_app/ios/Runner/Info.plist (no UIBackgroundModes / bluetooth-central)
+          bsms_app/pubspec.yaml (no background plugin)
+          bsms_app/lib/data/ble/ble_recording_service.dart only enables a wakelock
+          (L101)
+What:     The recording relies on the app staying open with the screen on. If the user
+          locks the phone or switches apps during a night recording, Android (Doze,
+          vendor battery savers) or iOS can suspend or kill the app. Together with H5
+          this also stops the SD recording.
+Fix:      Android: run the recording in a foreground service with a persistent
+          notification (e.g. flutter_foreground_task). iOS: bluetooth-central background
+          mode. Test a full night with the screen off.
+
+------------------------------------------------------------------------------------------
+M27  Disk-full write errors are never shown
+     MEDIUM | BLE | READ
+------------------------------------------------------------------------------------------
+Where:    bsms_app/lib/data/ble/ble_recording_service.dart _onPacket (L203-208: the
+          packet is dropped and addError is called on the status stream)
+          bsms_app/lib/presentation/live_ecg/live_ecg_screen.dart L78 (status listener
+          without onError)
+What:     On a write error the packet is dropped and an error goes to the status stream
+          "so the UI can show it". But the only listener has no onError, so the error
+          ends up in the zone handler and the user never sees it. The recording keeps
+          running and silently loses data.
+Fix:      Handle onError in the live screen (banner or snack bar), count dropped packets
+          in the session, and consider stopping the recording.
+
+==========================================================================================
+LOW
+==========================================================================================
+
+L1   Dead code and 16 empty files                                      LOW | REPO | READ
+     - Unused: bsms_app/lib/data/ecg_data_pipeline.dart, lib/data/ecg_data_processor.dart,
+       lib/data/buffer/ (ecg_ring_buffer.dart, buffer_config.dart),
+       lib/data/parsing/ecg_packet_parser.dart (a second EcgPacket class),
+       lib/data/storage/models/ (3 files), lib/domain/heart_rate_value.dart,
+       lib/presentation/widgets/ecg_chart.dart,
+       lib/presentation/services/ecg_processor.dart
+     - Empty (0 bytes), under bsms_app/lib/: app/app_config.dart, app/logger.dart,
+       data/parsing/packet_models.dart, data/storage/event_repository.dart,
+       data/storage/local_storage_service.dart, data/storage/session_repository.dart,
+       presentation/events/ (3 files), presentation/history/history_viewmodel.dart,
+       presentation/latency_test/ (2 files), presentation/live_ecg/ecg_painter.dart,
+       presentation/live_ecg/live_ecg_viewmodel.dart,
+       presentation/widgets/bpm_display.dart,
+       presentation/widgets/connection_indicator.dart
+     - lib/data/ecg_integration_test.dart is test code inside lib/ (it ships with the
+       app); only test/integration_test.dart uses it.
+     Fix: delete (keep EcgRingBuffer if it is used for L6); move the test helper to test/.
+
+L2   Outdated comments and docs                                        LOW | DOCS | READ
+     - Code comments describing old formats or behaviour (bsms_app/lib/...):
+       data/ble/ecg_packet_parser.dart L5-29 (47 bytes, uint32, 12-bit);
+       data/ble/ecg_packet.dart L4-7, L20-21 (47 bytes, boot-relative ms, 0..4095,
+       baseline 2048); domain/ecg_sample.dart L6-7 (0..65535, baseline 32768);
+       data/ble/ecg_ble_service.dart L16, L108 (47-byte); data/ble/ble_service.dart L9
+       (no UUID in advertising); domain/processing/ecg_filter.dart L27 ("direct form II
+       transposed" - the code is direct form I); domain/processing/r_peak_detector.dart
+       L8 (0.5-40 Hz input); domain/models/imported_session.dart L20 (disconnect samples
+       "have value 0" - nothing is written during a disconnect).
+       ESP32code/src/main.cpp L27 ("CEST currently active"), L251/L256 (searchback, see
+       H2), L334-335 (start/stop "reserved").
+     - Repo docs: AppTasks.txt (47-byte packets, 4-byte timestamp; many implemented
+       items still unchecked, e.g. filters, Pan-Tompkins, storage, export, lead-off),
+       BLE_TESTING_GUIDE.md, QUICK_START_BLE.md, BLUETOOTH_CONNECTION_STATUS.md (4-byte
+       timestamp, 47-byte packets).
+     - Root snippets for the old 47-byte / internal-ADC version: "Integrated ESP32
+       Firmware", "ECG Data Processing Logic (Dart)", "Binary to CSV Converter & Plotter"
+       (reads 47-byte packets with unsigned samples, so it can't read current SD files).
+     Fix: update or delete.
+
+L3   print() everywhere, avoid_print disabled                          LOW | CODE | READ
+     print() is used throughout (e.g. ecg_ble_service.dart); avoid_print is disabled in
+     bsms_app/analysis_options.yaml L24; app/logger.dart is empty.
+     Fix: debugPrint or package:logging behind a flag; re-enable the lint.
+
+L4   Database: FKs off, no migrations, delete order                 LOW | STORAGE | READ
+     - bsms_app/lib/data/storage/database_helper.dart has no onConfigure with
+       PRAGMA foreign_keys = ON, so ON DELETE SET NULL (L45) does nothing. Deleting a
+       person (PersonRepository.delete) leaves sessions with a dangling person_id: they
+       are still in History, but under no person.
+     - Version 1 with no onUpgrade: the first schema change needs a migration path.
+     - SessionStorageService.delete removes the files (L105) before the DB row (L109).
+       If the DB delete fails, the row points to missing files.
+     Fix: add onConfigure and an onUpgrade skeleton; delete the row first, then the
+     files.
+
+L5   Hard-coded German text and date formats                             LOW | UI | READ
+     - bsms_app/lib/data/ble/ble_recording_service.dart L206 'Schreibfehler (Speicher
+       voll?)' (see M27); L145 'BLE - <name>' as the session label
+     - bsms_app/lib/data/import/sd_card_import_service.dart L44: FormatException text
+       (not shown; the UI uses l10n)
+     - history_screen.dart L260 and persons_screen.dart L142: _fmtDate builds
+       "dd.MM.yyyy HH:mm" by hand instead of using the locale (intl DateFormat)
+     - bsms_app/ios/Runner/Info.plist L69-74: usage texts in German only
+
+L6   Performance: buffer trimming, sync I/O, scans                   LOW | UI/BLE | READ
+     - live_ecg_screen.dart L109-111 trims the live buffer with removeAt(0) in a loop
+       (O(n) each, 20 times per packet). Use a ring buffer or one removeRange.
+     - ble_recording_service.dart _onPacket does synchronous writes plus flushSync
+       every 5 s on the UI isolate (L204, L212-215): possible jank.
+     - imported_session_screen.dart _visibleRPeaks (L178-193) walks all R-peaks of the
+       recording on every build (~54,000 for 12 h), and there are similar full scans
+       elsewhere in the viewer. Use binary search on the sorted indices.
+
+L7   Lists don't refresh (History, person sessions)                      LOW | UI | READ
+     History doesn't reload after a new recording (only on pull-to-refresh).
+     persons_screen.dart caches a person's sessions after the first expand (L127-132,
+     L171) and never reloads them.
+
+L8   Viewer summary bar can overflow                                     LOW | UI | READ
+     The summary bar in imported_session_screen.dart (~L836-866) can overflow on narrow
+     phones or with large font scaling.
+
+L9   Recording service: start race, dispose, stop errors                LOW | BLE | READ
+     - In ble_recording_service.dart, the startRecording guard (isRecording means
+       _rawFile != null, L82) only becomes true after two awaits, so two quick calls can
+       both start: a second file handle and duplicate packet listeners. This is a
+       narrow race, because a person picker opens first.
+     - BleRecordingService.dispose() is never called (app.dart dispose, L107-110).
+     - live_ecg_screen.dart _stopRecording (L161-169) doesn't catch errors from stopping
+       or saving.
+
+L10  App HR clamped to 40-200 instead of rejected                       LOW | DSP | READ
+     ble_recording_service.dart L493 clamps the instant HR to 40-200, while the
+     firmware rejects values outside 30-200 (main.cpp L179). A 2 s RR (30 bpm) counts
+     as 40 bpm.
+
+L11  Release config: com.example ID, debug signing                 LOW | PLATFORM | READ
+     bsms_app/android/app/build.gradle.kts: applicationId "com.example.bsms_app" (L24),
+     and the release build is signed with the debug key (L37). pubspec.yaml
+     description: "A new Flutter project.". Needs fixing before any distribution.
+
+L12  Test gaps                                                        LOW | TESTS | READ
+     test/integration_test.dart only checks isNotNull. Nothing covers the offline
+     detector, BLE parser, session reader, recording service, events or CSV export.
+     (Tests for the live detector and the H3 case were added with the H1-H3 fixes.)
+     The recipes below can be turned into tests.
+
+L13  Repo hygiene                                                      LOW | REPO | READ
+     ESP32_Blink/ is a leftover blink project (8 tracked files).
+     .claude/settings.local.json is committed (personal Claude Code settings, usually
+     git-ignored). There are four code snippets without file extensions at the repo
+     root (see L2).
+
+L14  Firmware SD handling and boot robustness                            LOW | FW | READ
+     All in ESP32code/src/main.cpp:
+     - The SD write result is unchecked, and the file is never closed, only flushed
+       every 5 s (L562-568). Up to 5 s are lost on power-off, and a full or removed card
+       goes unnoticed.
+     - One file per boot (findNextFilename, L386-395); see M15.
+     - The SD state isn't reported to the app, so nobody sees that the backup isn't
+       working.
+     - If the ADS1115 isn't found, setup() halts before BLE starts (L446-449). The app
+       then simply never finds the device.
+     - Serial output uses the fixed UTC+2 (L27-28, printSample L309).
+
+L15  Viewer filtering: causal, fixed 50 Hz, short warm-up               LOW | DSP | READ
+     - EcgFilter (bsms_app/lib/domain/processing/ecg_filter.dart) is a causal IIR, which
+       delays and distorts the displayed waveform. For stored data a zero-phase
+       forward-backward pass is possible.
+     - The notch is fixed at 50 Hz (mains is 60 Hz in the Americas and parts of Asia).
+     - session_reader.dart pre-warms with only 1 s (L80). A 0.5 Hz high-pass still
+       carries ~10 % of its start-up error after 1 s, so window edges can show small
+       steps.
+
+L16  Person form errors; icon buttons without tooltips                   LOW | UI | READ
+     person_form.dart _save() (L40-58) has no error handling: on a DB error the spinner
+     stays and the exception is unhandled. The icon buttons in persons_screen.dart
+     (L161-170) have no tooltips (accessibility).
+
+L17  Searchback rescans the buffer every sample                      LOW | DSP/FW | READ
+     While a gap is open and nothing is found, the searchback rescans the whole
+     buffered window on every sample (main.cpp L256: up to 800 samples;
+     ble_recording_service.dart L519: up to 1000). On the ESP that is up to ~400,000
+     comparisons/s during pauses or lead-off. When fixing H2, scan once per gap or keep
+     a running maximum.
+
+L18  Duplicated constants; 3 drifting Pan-Tompkins versions            LOW | CODE | READ
+     - session_reader.dart L36/L120 and csv_export_service.dart L83 hard-code 51 and 20
+       instead of using the EcgPacketParser constants.
+     - event_detection_service.dart detect() and detectFromPeakIndices() duplicate the
+       same logic.
+     - The three Pan-Tompkins implementations (firmware, live, offline) have drifted
+       apart (decay, searchback, defaults). Consider one shared Dart implementation for
+       live and offline.
+
+==========================================================================================
+VERIFICATION RECIPES (synthetic ECG - can be turned into unit tests)
+==========================================================================================
+Signal: 500 Hz, integer samples. Baseline 13200 LSB plus uniform noise of +-10 LSB.
+  Each beat: R = Gaussian of +1000 LSB, sigma 10 samples (20 ms);
+             T = Gaussian of +250 LSB, sigma 20 samples, 125 samples (250 ms) after R.
+  RR = 400 samples (800 ms, 75 bpm) unless stated otherwise.
+Exact counts depend on the random noise (Dart Random seeds 1, 3 and 2 were used for H2,
+H1 and H4); the pattern does not.
+
+H1  Live pipeline, raw input: beats every 400 samples from sample 1000 for 10 min (748
+    beats). Feed the raw values (with baseline) sample by sample into StreamingPipeline.
+    Expected: nearly all beats, and no peaks before the first beat.
+    Before:   8 peaks at samples 75-82; first real beat found at 54.8 s; minute 1: 7 of
+              73 found plus 39 fake; then 75 of 75 per minute.
+    After:    748 of 748 found, no fake peaks, first peak at sample 1044 (2026-11-18).
+H2  Live pipeline, baseline subtracted: beats at 1000, 1400, ..., 9800, then a 3 s
+    pause, then 11300, 11700, ... up to 16000 (35 beats).
+    Expected: 35 peaks, none closer than 100 samples.
+    Before:   39 peaks; the extras are 1086, 9892, 9893 and 9894; the smallest gap is
+              1 sample.
+    After:    35 peaks, no extras, smallest gap 390 samples (2026-11-18).
+M3  Same run: detection index minus true R is median 42, max 48 samples (84 / 96 ms).
+H3  HrvCalculator.nnIntervals([0, 1500, 2300, 3100, ... every 800 ms, 100 more]).
+    Expected: ~101 NN intervals.
+    Before:   1 ([1500]); SDNN, RMSSD and live RMSSD are all null.
+    After:    101 (all 800 ms); SDNN, RMSSD and live RMSSD are 0 (2026-11-18).
+H4  60 s, beats every 400 samples from sample 300 (75 beats), plus +8000 LSB on samples
+    500-649; then EcgFilter.bandpass -> RPeakDetector.detect.
+    Expected: ~75.
+    Now:      17 peaks (15 real), none between 1.5 s and 49.5 s. Without the artefact:
+              75 of 75.
+M4  Firmware biquad: evaluate H(z) = (0.0305 - 0.0305 z^-2) / (1 - 1.9347 z^-1 +
+    0.9389 z^-2) at fs = 500 Hz: peak at 5.2 Hz, -3 dB at 3.3 and 8.3 Hz.
+
+The numbers above come from throwaway Dart scripts that call the real classes. The
+H1-H3 cases are now unit tests: bsms_app/test/streaming_pipeline_test.dart and
+bsms_app/test/hrv_calculator_test.dart.
+
+==========================================================================================
+WHAT IS GOOD (keep it)
+==========================================================================================
+- BLE recordings stream straight to disk in the 51-byte format, with a separate R-peak
+  index file, so 12 h recordings don't sit in RAM.
+- CSV export runs in a background isolate and streams file-backed sessions in chunks.
+- flutter analyze reports no issues, and all 5 languages have the same 120 keys.
+- The HRV calculator and the SD import have unit tests. The SPKI caps and the threshold
+  decay in the live and firmware detectors are well commented.

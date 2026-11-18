@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:path_provider/path_provider.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../../domain/models/imported_session.dart';
@@ -62,7 +63,7 @@ class BleRecordingService {
   final List<LeadOffInterval>   _leadOffIntervals   = [];
   final List<DisconnectInterval> _disconnectIntervals = [];
 
-  final _pipeline = _StreamingPipeline();
+  final _pipeline = StreamingPipeline();
   final _hrv = HrvCalculator(); // live 90 s RMSSD, recomputed every 10 s
 
   StreamSubscription<EcgPacket>? _packetSub;
@@ -224,8 +225,8 @@ class BleRecordingService {
       } catch (_) {} // HR is supplementary; ECG data loss is already reported above
     }
 
-    // Streaming R-peak detection — may return 0, 1 or 2 peaks per sample
-    // (searchback can retroactively yield a missed peak alongside a new one).
+    // Streaming R-peak detection — returns 0 or 1 peak per sample (a peak
+    // found by searchback lies in the past, but after the last stored one).
     for (int i = 0; i < packet.samples.length; i++) {
       final gIdx = _globalSampleIdx + i;
       final peaks = _pipeline.processSample(packet.samples[i], gIdx);
@@ -289,8 +290,12 @@ class BleRecordingService {
 //   • T-wave discrimination: peaks within 360 ms at < 50 % amplitude → T-wave
 //   • Searchback: if no beat for > 1.66 × meanRR, re-scan buffer at 50 % threshold
 //   • Better initialisation: SPKI = 50 % of init max, NPKI = 5 % of init max
+//   • Filters start from the first sample, so the ADC baseline causes no
+//     start-up transient
 
-class _StreamingPipeline {
+/// Public only so unit tests can drive it (test/streaming_pipeline_test.dart).
+@visibleForTesting
+class StreamingPipeline {
   static const double _fs = 500.0;
 
   // IIR filter coefficients (computed once in _computeCoefficients).
@@ -299,6 +304,7 @@ class _StreamingPipeline {
   late double _ntB1, _ntA1, _ntA2; // notch: b0=b2=1
 
   // Filter state
+  bool   _primed = false; // high-pass state already set from the first sample?
   double _hpX1 = 0, _hpX2 = 0, _hpY1 = 0, _hpY2 = 0;
   double _lpX1 = 0, _lpX2 = 0, _lpY1 = 0, _lpY2 = 0;
   double _ntX1 = 0, _ntX2 = 0, _ntY1 = 0, _ntY2 = 0;
@@ -313,6 +319,7 @@ class _StreamingPipeline {
   bool   _initialized = false;
   int    _initCount   = 0;
   double _initMax     = 0.0;
+  int    _samplesSinceLearn = 0; // while no beat found yet (re-learn check)
 
   // Adaptive thresholds
   double _spki = 0.0, _npki = 0.0;
@@ -336,16 +343,17 @@ class _StreamingPipeline {
 
   int get currentHr => _currentHr;
 
-  _StreamingPipeline() { _computeCoefficients(); }
+  StreamingPipeline() { _computeCoefficients(); }
 
   void reset() {
+    _primed = false;
     _hpX1 = _hpX2 = _hpY1 = _hpY2 = 0;
     _lpX1 = _lpX2 = _lpY1 = _lpY2 = 0;
     _ntX1 = _ntX2 = _ntY1 = _ntY2 = 0;
     _diffBuf.fillRange(0, 5, 0.0);
     _mwiBuf.fillRange(0, 75, 0.0);
     _mwiIdx = 0; _mwiSum = 0;
-    _initialized = false; _initCount = 0; _initMax = 0;
+    _initialized = false; _initCount = 0; _initMax = 0; _samplesSinceLearn = 0;
     _spki = 0; _npki = 0;
     _tracking = false; _candidatePeak = 0; _candidateGlobalIdx = -1;
     _lastPeakGlobalIdx = -100; _lastBeatGlobalIdx = -1;
@@ -354,12 +362,22 @@ class _StreamingPipeline {
     _sbHead = 0; _samplesSinceBeat = 0; _meanRrSamples = 0;
   }
 
-  /// Returns global indices of detected R-peaks for this sample.
-  /// Normally 0 or 1; occasionally 2 when searchback fires on the same sample
-  /// as a new beat.
+  /// Returns the global index of an R-peak confirmed at this sample, if any
+  /// (0 or 1 entries). Searchback only runs while no peak is being tracked, so
+  /// it can't fire on the same sample as a normal detection.
   List<int> processSample(int rawValue, int globalIdx) {
     // ── Filter chain ─────────────────────────────────────────────────────────
     final xi = rawValue.toDouble();
+    if (!_primed) {
+      // Start the high-pass as if the input had always been at this level:
+      // its coefficients sum to 0, so the first output is 0 and the ADC
+      // baseline (~13200 LSB) causes no start-up step. With zero state that
+      // step dominated the 2 s threshold learning and beats were missed for
+      // about a minute. Low-pass and notch then start from a 0 input, so their
+      // zero state is already correct.
+      _hpX1 = _hpX2 = xi;
+      _primed = true;
+    }
     var y = _hpB0*xi + _hpB1*_hpX1 + _hpB2*_hpX2 - _hpA1*_hpY1 - _hpA2*_hpY2;
     _hpX2 = _hpX1; _hpX1 = xi; _hpY2 = _hpY1; _hpY1 = y;
 
@@ -404,6 +422,25 @@ class _StreamingPipeline {
       return const [];
     }
 
+    // ── Re-learn after a bad start ───────────────────────────────────────────
+    // Still no beat 3 s after learning, and the last 2 s (the searchback
+    // buffer) stay far below the value the thresholds were learned from: the
+    // first 2 s most likely contained an artefact (movement, electrode
+    // contact). Learn again from the last 2 s instead of waiting ~40 s for the
+    // decay below.
+    if (_lastPeakGlobalIdx < 0) {
+      _samplesSinceLearn++;
+      if (_samplesSinceLearn >= 1500) {
+        _samplesSinceLearn = 0;
+        final recentMax = _sbBuf.reduce(math.max);
+        if (recentMax < 0.5 * _initMax) {
+          _initMax = recentMax;
+          _spki = recentMax * 0.5;
+          _npki = recentMax * 0.05;
+        }
+      }
+    }
+
     // ── Active threshold decay ──────────────────────────────────────────────
     // If no beat for > 1.5 × meanRR, decay BOTH thresholds at 5.75 %/s (PLOS ONE
     // 2016). Decaying SPKI alone is not enough: a noise burst can inflate NPKI
@@ -434,15 +471,13 @@ class _StreamingPipeline {
     final expectedGap = _meanRrSamples > 0
         ? (_meanRrSamples * 1.66).round()
         : 750;
-    if (_samplesSinceBeat > expectedGap) {
+    // Only after a first beat (before that there is no "missed" beat, only the
+    // learning window, which may hold an artefact), and not while a peak is
+    // being tracked: that stretch is handled by normal tracking below, and
+    // searching it here could store the same beat twice.
+    if (_lastPeakGlobalIdx >= 0 && _samplesSinceBeat > expectedGap && !_tracking) {
       final sb = _searchback(globalIdx, thr1 * 0.5);
-      if (sb != null) {
-        results.add(sb);
-        // Discard any in-progress tracking so the current sample's elevated MWI
-        // (still in the tail of the just-found QRS) is not counted as a second beat.
-        _tracking      = false;
-        _candidatePeak = 0;
-      }
+      if (sb != null) results.add(sb);
     }
 
     // ── Normal peak tracking ──────────────────────────────────────────────────
@@ -507,20 +542,39 @@ class _StreamingPipeline {
     _samplesSinceBeat  = 0;
   }
 
-  // ── Search the MWI buffer for the largest peak above halfThreshold ─────────
+  // ── Searchback: look back for a beat missed since the last stored peak ────
+  //
+  // Window, in samples before the current one (k = 0 → current sample):
+  //   k >= 100 (200 ms)       the newest 200 ms are still handled by normal
+  //                           peak tracking
+  //   k <= since peak - 100   starts 200 ms after the last stored peak, so its
+  //                           falling tail can't be picked again
+  // Only a real local maximum of the MWI counts (a maximum at a window edge is
+  // just the slope of a neighbouring beat), and a candidate within 360 ms of
+  // the last beat must pass the same T-wave check as normal tracking.
   int? _searchback(int currentGlobalIdx, double halfThreshold) {
-    const refractory = 100; // 200 ms
-    final windowEnd  = math.min(_samplesSinceBeat, _sbSize);
-    if (windowEnd <= refractory) return null;
+    const refractory  = 100; // 200 ms
+    const tWaveWindow = 180; // 360 ms
+    final sincePeak = currentGlobalIdx - _lastPeakGlobalIdx;
+    final kMax = math.min(
+      math.min(sincePeak - refractory, _sbSize - 2), // k + 1 must be buffered
+      currentGlobalIdx - 1,                           // k + 1 must exist
+    );
+    if (kMax < refractory) return null;
 
-    double maxMwi = 0;
+    double maxMwi = halfThreshold;
     int    bestK  = -1;
-    // k = samples before current sample; k=0 → current, k=1 → previous, …
-    for (int k = refractory; k < windowEnd; k++) {
-      final pos = ((_sbHead - 1 - k) % _sbSize + _sbSize) % _sbSize;
-      if (_sbBuf[pos] > maxMwi) { maxMwi = _sbBuf[pos]; bestK = k; }
+    for (int k = refractory; k <= kMax; k++) {
+      final v = _mwiAt(k);
+      if (v <= maxMwi) continue;
+      // Local maximum: above the newer neighbour, not below the older one
+      // (last sample of a plateau, as in RPeakDetector).
+      if (v <= _mwiAt(k - 1) || v < _mwiAt(k + 1)) continue;
+      if (sincePeak - k < tWaveWindow && v < 0.5 * _lastBeatMwi) continue;
+      maxMwi = v;
+      bestK  = k;
     }
-    if (bestK < 0 || maxMwi <= halfThreshold) return null;
+    if (bestK < 0) return null;
 
     final peakIdx = currentGlobalIdx - bestK;
     // Searchback peaks use half the SPKI update weight (Pan-Tompkins recommendation)
@@ -532,6 +586,10 @@ class _StreamingPipeline {
     _samplesSinceBeat = bestK;
     return peakIdx;
   }
+
+  /// MWI value [k] samples before the current one (k = 0 → current sample).
+  double _mwiAt(int k) =>
+      _sbBuf[((_sbHead - 1 - k) % _sbSize + _sbSize) % _sbSize];
 
   // ── Filter coefficients (Butterworth bilinear transform) ─────────────────
   void _computeCoefficients() {

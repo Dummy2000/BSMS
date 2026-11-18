@@ -24,7 +24,13 @@
       "WebFetch(domain:scis.scichina.com)",
       "Bash(flutter test *)",
       "Bash(Select-Object -Last 8)",
-      "Bash(flutter gen-l10n *)"
+      "Bash(flutter gen-l10n *)",
+      "Bash(cd \"c:/dev/BSMS/bsms_app\" && find ~/.pub-cache -path \"*syncfusion_flutter_charts*\" -name \"*.dart\" 2>/dev/null | head -5; echo \"---\"; grep -rn \"labelPosition\" ~/.pub-cache/hosted/*/syncfusion_flutter_charts*/lib/src/charts/axis/axis.dart 2>/dev/null | head)",
+      "Read(//c/Users/juesc/**)",
+      "Read(//c/Users/juesc/.pub-cache/**)",
+      "Bash(mkdir -p assets/fonts)",
+      "Bash(curl -sL -o assets/fonts/PressStart2P-Regular.ttf \"https://github.com/google/fonts/raw/main/ofl/pressstart2p/PressStart2P-Regular.ttf\")",
+      "Bash(xxd)"
     ]
   }
 }

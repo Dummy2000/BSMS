@@ -40,6 +40,12 @@ int16_t baseline = 13200;
 BLECharacteristic* pCharacteristic = nullptr;
 bool deviceConnected = false;
 
+// ===== Mess-Status =====
+// Der ESP startet im Standby (misst nicht). Die App schaltet ihn per Befehl
+// aktiv (0x01) bzw. zurück in Standby (0x00). Im Standby wird nicht gesampelt
+// und nichts gesendet; BLE bleibt verbindbar.
+static volatile bool g_active = false;
+
 // ===== Zeit-Synchronisation =====
 // Die App schickt beim Verbinden die aktuelle Uhrzeit (Unix-ms, 8 Byte LE).
 // Damit werden boot-relative millis() in echte Timestamps umgerechnet.
@@ -153,6 +159,13 @@ uint16_t sbHead           = 0;   // next-write position
 uint32_t samplesSinceBeat = 0;   // samples since last confirmed beat
 float    meanRrMs         = 0;   // exp-avg RR interval in ms
 float    lastBeatMwi      = 0;   // MWI of last confirmed beat (T-wave check)
+constexpr uint32_t SB_REFRACTORY = 100;  // samples = 200 ms
+
+// MWI value k samples before the current one (k = 0 → current sample).
+// k must be < SB_SIZE.
+static inline float sbAt(uint32_t k) {
+  return sbBuf[(sbHead + SB_SIZE - 1 - k) % SB_SIZE];
+}
 
 // Confirm a beat: update thresholds, HR, and searchback state.
 static void confirmBeat(unsigned long beatTime, float mwiVal, bool fromSearchback = false) {
@@ -238,27 +251,41 @@ void detectPeakPT(float mwiValue, unsigned long now_ms) {
   float threshold = NPKI + 0.25f * (SPKI - NPKI);
 
   // ── Searchback ────────────────────────────────────────────────────────────
-  // If no beat for > 1.66 × meanRR, scan the buffer at 50 % threshold.
+  // If no beat for > 1.66 × meanRR, look back for a missed beat at 50 %
+  // threshold. Window, in samples before the current one (k):
+  //   k >= SB_REFRACTORY                     skip the newest 200 ms; normal
+  //                                          tracking still handles them
+  //   k <= samplesSinceBeat - SB_REFRACTORY  start 200 ms after the last beat,
+  //                                          so its falling tail can't be
+  //                                          picked again
+  // Only a real local maximum counts (a maximum at the window edge is just the
+  // slope of a neighbouring beat), and a candidate within 360 ms of the last
+  // beat must pass the same T-wave check as normal tracking. Not while a peak
+  // is being tracked: that stretch is handled below, and searching it here
+  // could store the same beat twice.
   float expectedGapMs = (meanRrMs > 0) ? meanRrMs * 1.66f : 1500.0f;
-  if (lastBeatTimeForRR > 0 && (float)(now_ms - lastBeatTimeForRR) > expectedGapMs) {
+  if (lastBeatTimeForRR > 0 && !trackingPeak &&
+      (float)(now_ms - lastBeatTimeForRR) > expectedGapMs) {
     float halfThr = threshold * 0.5f;
-    // Search from 200 ms after last beat up to samplesSinceBeat samples back.
-    uint32_t searchEnd = (samplesSinceBeat < SB_SIZE) ? samplesSinceBeat : SB_SIZE;
-    float maxVal = 0;
-    uint16_t bestK = 0;
-    bool found = false;
-    for (uint32_t k = 100; k < searchEnd; k++) {  // k=100 → 200 ms refractory
-      uint16_t pos = (sbHead + SB_SIZE - 1 - k) % SB_SIZE;
-      if (sbBuf[pos] > maxVal) { maxVal = sbBuf[pos]; bestK = (uint16_t)k; found = true; }
+    uint32_t kMax = (samplesSinceBeat > SB_REFRACTORY) ? samplesSinceBeat - SB_REFRACTORY : 0;
+    if (kMax > SB_SIZE - 2) kMax = SB_SIZE - 2;  // k + 1 must still be buffered
+    float    maxVal = halfThr;
+    uint32_t bestK  = 0;
+    bool     found  = false;
+    for (uint32_t k = SB_REFRACTORY; k <= kMax; k++) {
+      float v = sbAt(k);
+      if (v <= maxVal) continue;
+      if (v <= sbAt(k - 1) || v < sbAt(k + 1)) continue;  // not a local maximum
+      unsigned long candTime = now_ms - k * 2UL;           // 2 ms/sample
+      if (candTime - lastBeatTimeForRR < 360 && v < 0.5f * lastBeatMwi) continue;  // T wave
+      maxVal = v;
+      bestK  = k;
+      found  = true;
     }
-    if (found && maxVal > halfThr) {
-      unsigned long beatTime = now_ms - (unsigned long)bestK * 2UL; // 2 ms/sample
-      confirmBeat(beatTime, maxVal, true); // fromSearchback = true
-      samplesSinceBeat = bestK; // samples elapsed since found beat
-      // Discard any in-progress tracking so the current elevated MWI
-      // (tail of the just-found QRS) is not counted as a second beat.
-      trackingPeak  = false;
-      candidatePeak = 0;
+    if (found) {
+      unsigned long beatTime = now_ms - bestK * 2UL;  // 2 ms/sample
+      confirmBeat(beatTime, maxVal, true);            // fromSearchback = true
+      samplesSinceBeat = bestK;                       // samples elapsed since found beat
     }
     // Re-read threshold (SPKI may have changed).
     threshold = NPKI + 0.25f * (SPKI - NPKI);
@@ -341,7 +368,18 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
       g_timeSynced = true;
       Serial.printf("Zeit synchronisiert: %llu ms (Unix-Epoch)\n", wallMs);
     } else if (len == 1) {
-      Serial.printf("Befehl empfangen: 0x%02X\n", data[0]);
+      if (data[0] == 0x01) {
+        // Start: aus dem Standby in den aktiven Messbetrieb wechseln.
+        nextSampleTime = micros();   // Sample-Timer zurücksetzen (kein Burst)
+        g_active = true;
+        Serial.println("Messung gestartet (aktiv)");
+      } else if (data[0] == 0x00) {
+        // Standby: Sampling/Senden anhalten, BLE bleibt verbunden.
+        g_active = false;
+        Serial.println("Standby");
+      } else {
+        Serial.printf("Befehl empfangen: 0x%02X\n", data[0]);
+      }
     }
   }
 };
@@ -354,6 +392,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
   }
   void onDisconnect(BLEServer* pServer) override {
     deviceConnected = false;
+    g_active = false;  // bei Trennung zurück in den Standby
     setLed(false);
     Serial.println("Client disconnected");
     BLEDevice::startAdvertising();
@@ -492,6 +531,12 @@ void setup() {
 // ============================================================================
 
 void loop() {
+  // Standby: nicht sampeln/senden; BLE bleibt im Hintergrund verbindbar.
+  if (!g_active) {
+    delay(10);
+    return;
+  }
+
   if ((long)(micros() - nextSampleTime) >= 0) {
     nextSampleTime += 2000;   // 500 SPS
 

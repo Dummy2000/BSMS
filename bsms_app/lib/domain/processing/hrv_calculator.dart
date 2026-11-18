@@ -1,5 +1,10 @@
 import 'dart:math' as math;
 
+/// One kept RR interval: [tMs] = timestamp of the R-peak that ends it,
+/// [adjPrev] = true if the RR interval right before it was kept as well
+/// (only such pairs may be used for successive differences).
+typedef _NnInterval = ({int tMs, int rr, bool adjPrev});
+
 /// Heart-rate-variability (HRV) calculation from R-peak timestamps.
 ///
 /// Pure Dart, no external package. Provides:
@@ -10,13 +15,21 @@ import 'dart:math' as math;
 /// **Artefact filtering** (applied to both metrics): R-peak timestamps are
 /// converted to RR intervals, then an interval is kept ("NN interval") only if
 ///   1. it lies within [[minRrMs], [maxRrMs]] (200…30 BPM), and
-///   2. it differs by at most [maxRelDiff] (20 %) from the previous *valid* RR
-///      (removes ectopic beats that would otherwise inflate RMSSD).
+///   2. it differs by at most [maxRelDiff] (20 %) from the median of its
+///      neighbouring plausible intervals: up to [refNeighbours] / 2 before and
+///      after it for a whole series, the last [refNeighbours] for live RMSSD.
+///      An interval with no neighbour to compare with is kept.
+/// The reference is the median of the raw neighbours, not the last *kept*
+/// interval, so one odd interval (missed beat, artefact) can't make the filter
+/// reject everything after it, and a real change of rhythm is followed within
+/// a few beats. RMSSD only uses differences between kept intervals that were
+/// adjacent in the original series.
 class HrvCalculator {
   // ── Filter configuration ────────────────────────────────────────────────
-  static const int    minRrMs    = 300;   // 200 BPM
-  static const int    maxRrMs    = 2000;  // 30 BPM
-  static const double maxRelDiff = 0.20;  // 20 % change vs. previous valid RR
+  static const int    minRrMs       = 300;  // 200 BPM
+  static const int    maxRrMs       = 2000; // 30 BPM
+  static const double maxRelDiff    = 0.20; // 20 % change vs. neighbour median
+  static const int    refNeighbours = 6;    // size of the reference (see above)
 
   // ── Live moving-window configuration ───────────────────────────────────────
   /// Length of the sliding window for live RMSSD.
@@ -36,8 +49,9 @@ class HrvCalculator {
 
   // ── Live state ────────────────────────────────────────────────────────────
   int? _lastPeakMs;
-  int? _lastValidRr;
-  final List<({int tMs, int rr})> _window = [];
+  final List<int> _recentRr = []; // last [refNeighbours] plausible RRs, kept or not
+  bool _lastRrKept = false;       // was the previous RR interval kept?
+  final List<_NnInterval> _window = [];
   double? _rmssd;
   int? _lastUpdateMs;
 
@@ -51,7 +65,8 @@ class HrvCalculator {
   /// Clears all live state. Call when a new recording starts.
   void reset() {
     _lastPeakMs = null;
-    _lastValidRr = null;
+    _recentRr.clear();
+    _lastRrKept = false;
     _window.clear();
     _rmssd = null;
     _lastUpdateMs = null;
@@ -64,9 +79,13 @@ class HrvCalculator {
   void addPeak(int peakMs) {
     if (_lastPeakMs != null) {
       final rr = peakMs - _lastPeakMs!;
-      if (_acceptRr(rr, _lastValidRr)) {
-        _window.add((tMs: peakMs, rr: rr));
-        _lastValidRr = rr;
+      final plausible = _inRange(rr);
+      final keep = plausible && _withinReference(rr, _recentRr);
+      if (keep) _window.add((tMs: peakMs, rr: rr, adjPrev: _lastRrKept));
+      _lastRrKept = keep;
+      if (plausible) {
+        _recentRr.add(rr);
+        if (_recentRr.length > refNeighbours) _recentRr.removeAt(0);
       }
     }
     _lastPeakMs = peakMs;
@@ -79,39 +98,21 @@ class HrvCalculator {
     _lastUpdateMs ??= peakMs;
     if (peakMs - _lastUpdateMs! >= updateIntervalMs) {
       _lastUpdateMs = peakMs;
-      _rmssd = _window.length >= minNnForRmssd
-          ? rmssdFromNn(_window.map((e) => e.rr).toList())
-          : null;
+      _rmssd = _window.length >= minNnForRmssd ? _rmssdAdjacent(_window) : null;
     }
   }
 
   // ── Static helpers (session / tests) ────────────────────────────────────────
 
-  /// True if [rr] passes the absolute and difference-based artefact filters.
-  static bool _acceptRr(int rr, int? lastValidRr) {
-    if (rr < minRrMs || rr > maxRrMs) return false;
-    if (lastValidRr != null &&
-        (rr - lastValidRr).abs() > maxRelDiff * lastValidRr) {
-      return false;
-    }
-    return true;
-  }
-
   /// Converts R-peak timestamps (ms) to filtered NN intervals (ms).
-  static List<int> nnIntervals(List<int> peakTimestampsMs) {
-    final nn = <int>[];
-    int? lastValid;
-    for (int i = 1; i < peakTimestampsMs.length; i++) {
-      final rr = peakTimestampsMs[i] - peakTimestampsMs[i - 1];
-      if (!_acceptRr(rr, lastValid)) continue;
-      nn.add(rr);
-      lastValid = rr;
-    }
-    return nn;
-  }
+  static List<int> nnIntervals(List<int> peakTimestampsMs) =>
+      _filterSeries(peakTimestampsMs).map((e) => e.rr).toList();
 
-  /// RMSSD (ms) over a list of NN intervals:
+  /// RMSSD (ms) over a list of *consecutive* NN intervals:
   /// `sqrt( mean( (NN[i+1] - NN[i])^2 ) )`. Null if fewer than 2 NN intervals.
+  ///
+  /// For a filtered series (where intervals were removed in between) use
+  /// [rmssdForSeries], which only pairs originally adjacent intervals.
   static double? rmssdFromNn(List<int> nn) {
     if (nn.length < 2) return null;
     double sumSq = 0;
@@ -123,11 +124,12 @@ class HrvCalculator {
   }
 
   /// RMSSD (ms) computed over all R-peak timestamps (full series, not windowed).
-  /// Null if fewer than [minNn] valid NN intervals remain after filtering.
+  /// Null if fewer than [minNn] valid NN intervals remain after filtering, or if
+  /// no two kept intervals were adjacent.
   static double? rmssdForSeries(List<int> peakTimestampsMs, {int minNn = 2}) {
-    final nn = nnIntervals(peakTimestampsMs);
+    final nn = _filterSeries(peakTimestampsMs);
     if (nn.length < minNn) return null;
-    return rmssdFromNn(nn);
+    return _rmssdAdjacent(nn);
   }
 
   /// SDNN (ms): standard deviation of all valid NN intervals over the whole
@@ -143,5 +145,71 @@ class HrvCalculator {
       sumSq += d * d;
     }
     return math.sqrt(sumSq / (nn.length - 1));
+  }
+
+  // ── Internals ──────────────────────────────────────────────────────────────
+
+  static bool _inRange(int rr) => rr >= minRrMs && rr <= maxRrMs;
+
+  /// True if [rr] is within [maxRelDiff] of the median of [reference]
+  /// (or if there is nothing to compare with).
+  static bool _withinReference(int rr, List<int> reference) {
+    if (reference.isEmpty) return true;
+    final ref = _median(reference);
+    return (rr - ref).abs() <= maxRelDiff * ref;
+  }
+
+  static double _median(List<int> values) {
+    final s = [...values]..sort();
+    final m = s.length ~/ 2;
+    return s.length.isOdd ? s[m].toDouble() : (s[m - 1] + s[m]) / 2.0;
+  }
+
+  /// Artefact filter for a whole series: each plausible interval is compared
+  /// with the median of up to [refNeighbours] / 2 plausible intervals on each
+  /// side of it.
+  static List<_NnInterval> _filterSeries(List<int> peakTimestampsMs) {
+    // Plausible RR intervals and their position in the raw RR series.
+    final pos = <int>[];
+    final rr  = <int>[];
+    for (int i = 1; i < peakTimestampsMs.length; i++) {
+      final v = peakTimestampsMs[i] - peakTimestampsMs[i - 1];
+      if (_inRange(v)) {
+        pos.add(i - 1);
+        rr.add(v);
+      }
+    }
+
+    const side = refNeighbours ~/ 2;
+    final out = <_NnInterval>[];
+    int lastKeptPos = -2;
+    for (int j = 0; j < rr.length; j++) {
+      final reference = <int>[
+        for (int q = math.max(0, j - side); q < j; q++) rr[q],
+        for (int q = j + 1; q <= math.min(rr.length - 1, j + side); q++) rr[q],
+      ];
+      if (!_withinReference(rr[j], reference)) continue;
+      out.add((
+        tMs: peakTimestampsMs[pos[j] + 1],
+        rr: rr[j],
+        adjPrev: pos[j] == lastKeptPos + 1,
+      ));
+      lastKeptPos = pos[j];
+    }
+    return out;
+  }
+
+  /// RMSSD over kept intervals, using only pairs that were adjacent in the
+  /// original series. Null if there is no such pair.
+  static double? _rmssdAdjacent(List<_NnInterval> nn) {
+    double sumSq = 0;
+    int pairs = 0;
+    for (int i = 1; i < nn.length; i++) {
+      if (!nn[i].adjPrev) continue;
+      final d = nn[i].rr - nn[i - 1].rr;
+      sumSq += d * d;
+      pairs++;
+    }
+    return pairs == 0 ? null : math.sqrt(sumSq / pairs);
   }
 }

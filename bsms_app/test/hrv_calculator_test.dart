@@ -14,12 +14,13 @@ void main() {
       // RR = [800, 50 (drop), 800, 2500 (drop)]
       // peaks: 0, 800, 850, 1650, 4150
       final peaks = [0, 800, 850, 1650, 4150];
-      // 800 ok; 50 drop; 800 (vs lastValid 800) ok; 2500 drop
+      // 800 ok; 50 drop; 800 (neighbour median 800) ok; 2500 drop
       expect(HrvCalculator.nnIntervals(peaks), [800, 800]);
     });
 
-    test('drops RR differing > 20 % from previous valid RR (ectopic filter)', () {
-      // RR = [800, 800, 1000]; 1000 vs 800 → 200 ms > 160 ms (20 %) → dropped
+    test('drops RR differing > 20 % from its neighbours (ectopic filter)', () {
+      // RR = [800, 800, 1000]; neighbour median of 1000 is 800
+      // → 200 ms > 160 ms (20 %) → dropped
       final peaks = [0, 800, 1600, 2600];
       expect(HrvCalculator.nnIntervals(peaks), [800, 800]);
     });
@@ -28,6 +29,70 @@ void main() {
       // RR = [800, 920]; 920 vs 800 = 120 ms ≤ 160 ms → kept
       final peaks = [0, 800, 1720];
       expect(HrvCalculator.nnIntervals(peaks), [800, 920]);
+    });
+  });
+
+  group('artefact filter: no lock-out after one unusual interval', () {
+    // R-peaks: 1 x 1500 ms (missed beat), then 101 x 800 ms. Comparing with the
+    // last *kept* interval rejected everything after the 1500 → no HRV at all.
+    final lockOutPeaks = [
+      0, 1500,
+      for (int t = 2300; t <= 2300 + 800 * 100; t += 800) t,
+    ];
+
+    List<int> peaksFromRr(List<int> rr) {
+      final peaks = <int>[0];
+      for (final v in rr) {
+        peaks.add(peaks.last + v);
+      }
+      return peaks;
+    }
+
+    test('series: the intervals after an unusual first one are kept', () {
+      final nn = HrvCalculator.nnIntervals(lockOutPeaks);
+      expect(nn.length, 101);
+      expect(nn, everyElement(800));
+      expect(HrvCalculator.sdnn(lockOutPeaks), 0.0);
+      expect(HrvCalculator.rmssdForSeries(lockOutPeaks), 0.0);
+    });
+
+    test('live: RMSSD is available after an unusual first interval', () {
+      final hrv = HrvCalculator(minNnForRmssd: 16);
+      for (final t in lockOutPeaks) {
+        hrv.addPeak(t);
+      }
+      expect(hrv.rmssd, isNotNull);
+      expect(hrv.rmssd!, closeTo(0.0, 1e-9));
+    });
+
+    test('a lasting change of rhythm > 20 % is followed', () {
+      // 30 x 1000 ms, then 30 x 700 ms (e.g. HR rose during a lead-off gap).
+      // Before the fix all 700 ms intervals were rejected.
+      final peaks = peaksFromRr([...List.filled(30, 1000), ...List.filled(30, 700)]);
+      expect(HrvCalculator.nnIntervals(peaks).where((v) => v == 700).length, 30);
+
+      final hrv = HrvCalculator(minNnForRmssd: 2, updateIntervalMs: 0);
+      for (final t in peaks) {
+        hrv.addPeak(t);
+      }
+      // Live only looks back, so the first 3 intervals after the jump are
+      // rejected: 30 + 27 kept.
+      expect(hrv.nnCountInWindow, 57);
+    });
+
+    test('RMSSD only pairs intervals that were adjacent before filtering', () {
+      // 800, 810, 800, then an ectopic beat (500 + 1100, both dropped), then
+      // 900, 910, 900. Adjacent pairs all differ by 10 ms → RMSSD 10.
+      // Pairing 800 → 900 across the dropped beats would give ~45.6.
+      final peaks = peaksFromRr([800, 810, 800, 500, 1100, 900, 910, 900]);
+      expect(HrvCalculator.nnIntervals(peaks), [800, 810, 800, 900, 910, 900]);
+      expect(HrvCalculator.rmssdForSeries(peaks), closeTo(10.0, 1e-9));
+
+      final hrv = HrvCalculator(minNnForRmssd: 2, updateIntervalMs: 0);
+      for (final t in peaks) {
+        hrv.addPeak(t);
+      }
+      expect(hrv.rmssd!, closeTo(10.0, 1e-9));
     });
   });
 

@@ -8,6 +8,13 @@
 #include <SPI.h>
 #include <SD.h>
 
+// ===== Serial-Ausgabe =====
+// false → im Serial Monitor erscheint nur der SD-Karten-Status
+// true  → alle Debug-Ausgaben (Samples, BLE, Init, ...) wieder aktiv
+constexpr bool SERIAL_VERBOSE = false;
+#define LOG_PRINTF(...)  do { if (SERIAL_VERBOSE) Serial.printf(__VA_ARGS__);  } while (0)
+#define LOG_PRINTLN(...) do { if (SERIAL_VERBOSE) Serial.println(__VA_ARGS__); } while (0)
+
 volatile uint8_t currentHR = 0;
 
 // ===== UUIDs =====
@@ -77,6 +84,16 @@ File ekgFile;
 bool sdAvailable = false;
 constexpr unsigned long FLUSH_INTERVAL_MS = 5000;
 unsigned long lastFlushMs = 0;
+
+// SD-Status wird periodisch wiederholt, damit man ihn auch sieht,
+// wenn der Serial Monitor erst nach dem Boot verbunden wird.
+constexpr unsigned long SD_STATUS_INTERVAL_MS = 2000;
+unsigned long lastSdStatusMs = 0;
+char sdStatusMsg[96] = "SD-Karte: noch nicht initialisiert";
+
+void printSdStatus() {
+  Serial.println(sdStatusMsg);
+}
 
 // ===== Batch-Konfiguration =====
 constexpr uint8_t SAMPLES_PER_BATCH = 20;
@@ -234,7 +251,7 @@ void detectPeakPT(float mwiValue, unsigned long now_ms) {
       SPKI = initMaxMwi * 0.5f;   // 50 % of max → conservative signal estimate
       NPKI = initMaxMwi * 0.05f;  // 5 % of max → initial noise floor
       initialized = true;
-      Serial.printf("PT init: SPKI=%.0f NPKI=%.0f\n", SPKI, NPKI);
+      LOG_PRINTF("PT init: SPKI=%.0f NPKI=%.0f\n", SPKI, NPKI);
     }
     return;
   }
@@ -361,7 +378,7 @@ void printSample(const EcgSample& s) {
   else if (s.status & STATUS_LO_PLUS)                          statusStr = "LO+OFF";
   else if (s.status & STATUS_LO_MINUS)                         statusStr = "LO-OFF";
 
-  Serial.printf("%02u:%02u:%02u.%03u,%d,%03u,%s\n",
+  LOG_PRINTF("%02u:%02u:%02u.%03u,%d,%03u,%s\n",
                 hours, minutes, seconds, ms_part, s.adc_value, s.hr_avg, statusStr);
 }
 
@@ -381,19 +398,19 @@ class MyCharCallbacks : public BLECharacteristicCallbacks {
       g_syncWallMs = wallMs;
       g_syncBootMs = (uint32_t)millis();
       g_timeSynced = true;
-      Serial.printf("Zeit synchronisiert: %llu ms (Unix-Epoch)\n", wallMs);
+      LOG_PRINTF("Zeit synchronisiert: %llu ms (Unix-Epoch)\n", wallMs);
     } else if (len == 1) {
       if (data[0] == 0x01) {
         // Start: aus dem Standby in den aktiven Messbetrieb wechseln.
         nextSampleTime = micros();   // Sample-Timer zurücksetzen (kein Burst)
         g_active = true;
-        Serial.println("Messung gestartet (aktiv)");
+        LOG_PRINTLN("Messung gestartet (aktiv)");
       } else if (data[0] == 0x00) {
         // Standby: Sampling/Senden anhalten, BLE bleibt verbunden.
         g_active = false;
-        Serial.println("Standby");
+        LOG_PRINTLN("Standby");
       } else {
-        Serial.printf("Befehl empfangen: 0x%02X\n", data[0]);
+        LOG_PRINTF("Befehl empfangen: 0x%02X\n", data[0]);
       }
     }
   }
@@ -403,13 +420,13 @@ class MyServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer* pServer) override {
     deviceConnected = true;
     setLed(true);
-    Serial.println("Client connected");
+    LOG_PRINTLN("Client connected");
   }
   void onDisconnect(BLEServer* pServer) override {
     deviceConnected = false;
     g_active = false;  // bei Trennung zurück in den Standby
     setLed(false);
-    Serial.println("Client disconnected");
+    LOG_PRINTLN("Client disconnected");
     BLEDevice::startAdvertising();
   }
 };
@@ -431,34 +448,36 @@ String findNextFilename() {
 }
 
 void setupSD() {
-  Serial.println("Initialisiere SD-Karte...");
+  sdAvailable = false;
+
   if (!SD.begin(SD_CS_PIN)) {
-    Serial.println("FEHLER: SD-Karte nicht gefunden!");
-    sdAvailable = false;
+    snprintf(sdStatusMsg, sizeof(sdStatusMsg), "SD-Karte: FEHLER - nicht gefunden!");
+    printSdStatus();
     return;
   }
 
-  uint8_t cardType = SD.cardType();
-  if (cardType == CARD_NONE) {
-    Serial.println("FEHLER: Keine SD-Karte erkannt!");
-    sdAvailable = false;
+  if (SD.cardType() == CARD_NONE) {
+    snprintf(sdStatusMsg, sizeof(sdStatusMsg), "SD-Karte: FEHLER - keine Karte erkannt!");
+    printSdStatus();
     return;
   }
 
-  Serial.printf("Card Size: %llu MB\n", SD.cardSize() / (1024 * 1024));
-
+  uint64_t sizeMb = SD.cardSize() / (1024 * 1024);
   String filename = findNextFilename();
-  Serial.printf("Schreibe nach: %s\n", filename.c_str());
 
   ekgFile = SD.open(filename, FILE_WRITE);
   if (!ekgFile) {
-    Serial.println("FEHLER: Datei konnte nicht angelegt werden!");
-    sdAvailable = false;
+    snprintf(sdStatusMsg, sizeof(sdStatusMsg),
+             "SD-Karte: gefunden (%llu MB), FEHLER - %s konnte nicht angelegt werden!",
+             sizeMb, filename.c_str());
+    printSdStatus();
     return;
   }
 
   sdAvailable = true;
-  Serial.println("SD-Karte bereit.");
+  snprintf(sdStatusMsg, sizeof(sdStatusMsg),
+           "SD-Karte: OK (%llu MB), schreibe nach %s", sizeMb, filename.c_str());
+  printSdStatus();
 }
 
 
@@ -474,7 +493,7 @@ void setup() {
   Serial.setTxTimeoutMs(0);
 #endif
   delay(500);
-  Serial.println("Start (ADS1115 + Pan-Tompkins + SD)...");
+  LOG_PRINTLN("Start (ADS1115 + Pan-Tompkins + SD)...");
 
   // (NEU) LED-Pin konfigurieren, initial AUS
   if (USE_LED) pinMode(LED_PIN, OUTPUT);
@@ -485,10 +504,10 @@ void setup() {
   Wire.setClock(400000);
 
   if (!ads.begin()) {
-    Serial.println("FEHLER: ADS1115 nicht gefunden!");
+    LOG_PRINTLN("FEHLER: ADS1115 nicht gefunden!");
     while (1) { delay(1000); }
   }
-  Serial.println("ADS1115 gefunden.");
+  LOG_PRINTLN("ADS1115 gefunden.");
 
   ads.setGain(GAIN_ONE);
   ads.setDataRate(RATE_ADS1115_860SPS);
@@ -499,7 +518,7 @@ void setup() {
   pinMode(LO_MINUS_PIN, INPUT);
 
   // ----- Auto-Baseline -----
-  Serial.println("Kalibriere Baseline (0,5 s)...");
+  LOG_PRINTLN("Kalibriere Baseline (0,5 s)...");
   long sum = 0;
   int  count = 0;
   unsigned long start = millis();
@@ -509,7 +528,7 @@ void setup() {
     delay(2);
   }
   if (count > 0) baseline = sum / count;
-  Serial.printf("Baseline: %d\n", baseline);
+  LOG_PRINTF("Baseline: %d\n", baseline);
 
   // ----- SD-Karte -----
   setupSD();
@@ -538,11 +557,12 @@ void setup() {
   pAdvertising->setScanResponse(true);
   BLEDevice::startAdvertising();
 
-  Serial.println("BLE Advertising gestartet als 'EKG-Holter'");
-  Serial.printf("Paketgröße: %u Bytes\n", sizeof(EcgPacket));
+  LOG_PRINTLN("BLE Advertising gestartet als 'EKG-Holter'");
+  LOG_PRINTF("Paketgröße: %u Bytes\n", sizeof(EcgPacket));
 
   nextSampleTime = micros();
   lastFlushMs = millis();
+  lastSdStatusMs = millis();
 }
 
 
@@ -551,6 +571,12 @@ void setup() {
 // ============================================================================
 
 void loop() {
+  // SD-Status periodisch wiederholen (auch im Standby)
+  if (millis() - lastSdStatusMs >= SD_STATUS_INTERVAL_MS) {
+    lastSdStatusMs = millis();
+    printSdStatus();
+  }
+
   // Standby: nicht sampeln/senden; BLE bleibt im Hintergrund verbindbar.
   if (!g_active) {
     delay(10);
@@ -582,7 +608,7 @@ void loop() {
     currentPacket.samples[batchIndex] = adcValue;
     batchIndex++;
 
-    if (batchIndex == 1) {
+    if (SERIAL_VERBOSE && batchIndex == 1) {
       EcgSample s;
       s.timestamp_ms = currentPacket.timestamp_ms;
       s.adc_value    = adcValue;

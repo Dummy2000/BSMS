@@ -15,13 +15,27 @@ volatile uint8_t currentHR = 0;
 #define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 
 // ===== Pins =====
+#if defined(ARDUINO_XIAO_ESP32S3)
+// Seeed XIAO ESP32-S3
+//   I²C (Wire default):  SDA = D4 (GPIO5), SCL = D5 (GPIO6)
+//   SPI (SPI default):   SCK = D8 (GPIO7), MISO = D9 (GPIO8), MOSI = D10 (GPIO9)
+constexpr uint8_t LO_PLUS_PIN  = D0;  // GPIO1
+constexpr uint8_t LO_MINUS_PIN = D1;  // GPIO2
+constexpr uint8_t SD_CS_PIN    = D3;  // GPIO4 – externes SD-Modul
+// Hinweis: Beim Sense-Erweiterungsboard liegt SD-CS auf GPIO21 (= User-LED).
+// Dann SD_CS_PIN = 21 setzen und USE_LED auf false.
+constexpr bool    USE_LED      = true;
+constexpr uint8_t LED_PIN      = LED_BUILTIN;  // GPIO21, gelb, active-low
+constexpr bool    LED_ACTIVE_LOW = true;
+#else
+// Generisches ESP32 DevKit
 constexpr uint8_t LO_PLUS_PIN  = 35;
 constexpr uint8_t LO_MINUS_PIN = 36;
-constexpr uint8_t SD_CS_PIN    = 5;   // SPI Chip Select für SD
-
-// LED-Pin. Active-high (HIGH = an, LOW = aus).
-// GPIO21 (XIAO built-in) ist active-low — dort HIGH/LOW tauschen.
-constexpr uint8_t LED_PIN = 2;
+constexpr uint8_t SD_CS_PIN    = 5;
+constexpr bool    USE_LED      = true;
+constexpr uint8_t LED_PIN      = 2;
+constexpr bool    LED_ACTIVE_LOW = false;
+#endif
 
 // ===== Timezone =====
 // Vienna: UTC+1 (CET, winter) or UTC+2 (CEST, summer — currently active)
@@ -91,7 +105,8 @@ struct EcgSample {
 
 // (NEU) LED setzen - kapselt die active-low-Logik
 void setLed(bool on) {
-  digitalWrite(LED_PIN, on ? HIGH : LOW);
+  if (!USE_LED) return;
+  digitalWrite(LED_PIN, (on != LED_ACTIVE_LOW) ? HIGH : LOW);
 }
 
 
@@ -453,11 +468,16 @@ void setupSD() {
 
 void setup() {
   Serial.begin(921600);
+#if ARDUINO_USB_CDC_ON_BOOT
+  // USB-CDC: nicht blockieren, wenn kein PC angeschlossen ist
+  // (sonst bricht das 500-Hz-Timing ein).
+  Serial.setTxTimeoutMs(0);
+#endif
   delay(500);
   Serial.println("Start (ADS1115 + Pan-Tompkins + SD)...");
 
   // (NEU) LED-Pin konfigurieren, initial AUS
-  pinMode(LED_PIN, OUTPUT);
+  if (USE_LED) pinMode(LED_PIN, OUTPUT);
   setLed(false);
 
   // ----- I²C + ADS1115 -----
